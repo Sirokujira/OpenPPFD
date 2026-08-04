@@ -314,6 +314,159 @@ double canopy_deposit(const ppfd_t *p, vec3_t a, vec3_t b, double w, double *dep
 	return tr;
 }
 
+/* 群落の上面 (iz = 1) / 下面 (iz = 0) の矩形 */
+static void canopy_plane(const ppfd_t *p, int istop, vec3_t *poly)
+{
+	const double z = istop ? p->canopy.ztop : p->canopy.zbot;
+
+	poly[0] = v_make(0.0,    0.0,    z);
+	poly[1] = v_make(p->Lx,  0.0,    z);
+	poly[2] = v_make(p->Lx,  p->Ly,  z);
+	poly[3] = v_make(0.0,    p->Ly,  z);
+}
+
+/*
+散乱モデルの前処理 (setup_ff のあと)。
+
+  cffup[i] / cffdn[i] : パッチ i から群落上面 / 下面への形態係数。
+      上面より上のパッチだけが上面を、下面より下のパッチだけが下面を見る。
+      群落の高さ範囲に重心があるパッチ (埋没パッチ) はどちらとも交換しない
+      — 1 次元カラム近似では横方向の輸送が定義されないため。数はログに出す。
+
+      面から出た放射束が過不足なくパッチへ渡るよう Σ_i A_i F_i = A_c へ
+      正規化する。正規化前の比 (1 が理想) を診断として出す。求積誤差と
+      埋没パッチのぶんだけ 1 から外れるので、近似の強さがそのまま見える。
+
+  cdepw[i][m] : パッチ i の放射発散度 1 単位あたり、層 m へ預けられる
+      放射束 [m²]。A_i Σ_j F_ij (i→j の経路が層 m で落とす割合)。
+      素の遮断 k = G a は波長によらないので、この係数は 1 回作れば足りる。
+*/
+void canopy_setup(ppfd_t *p)
+{
+	const canopy_t *c = &p->canopy;
+	const int n = p->npatch;
+	const int nl = c->nlayer;
+	vec3_t ptop[4], pbot[4];
+	double sup = 0.0, sdn = 0.0;
+	int    i, m;
+
+	p->carea = p->Lx * p->Ly;
+	p->cffup = (double *)xcalloc((size_t)n, sizeof(double));
+	p->cffdn = (double *)xcalloc((size_t)n, sizeof(double));
+	p->cdepw = (double *)xcalloc((size_t)n * nl, sizeof(double));
+	p->cdep  = (double *)xcalloc((size_t)nl * p->nlam, sizeof(double));
+	p->cfdn  = (double *)xcalloc((size_t)(nl + 1) * p->nlam, sizeof(double));
+	p->cfup  = (double *)xcalloc((size_t)(nl + 1) * p->nlam, sizeof(double));
+	p->cbtop = (double *)xcalloc((size_t)p->nlam, sizeof(double));
+	p->cbbot = (double *)xcalloc((size_t)p->nlam, sizeof(double));
+	p->cabs  = (double *)xcalloc((size_t)p->nlam, sizeof(double));
+
+	canopy_plane(p, 1, ptop);
+	canopy_plane(p, 0, pbot);
+
+	p->cnburied = 0;
+	for (i = 0; i < n; i++) {
+		const patch_t *q = &p->patch[i];
+		/* 上面は「群落より上」の求積点だけ、下面は「群落より下」だけが見る */
+		p->cffup[i] = ff_patch_poly(q, ptop, 4, 4, ptop[0], v_make(0, 0, 1));
+		p->cffdn[i] = ff_patch_poly(q, pbot, 4, 4, pbot[0], v_make(0, 0, -1));
+		sup += q->area * p->cffup[i];
+		sdn += q->area * p->cffdn[i];
+		if ((p->cffup[i] <= 0.0) && (p->cffdn[i] <= 0.0)
+		 && (q->c.z < c->ztop) && (q->c.z > c->zbot)) {
+			p->cnburied++;
+		}
+	}
+
+	/* 面から出た放射束を過不足なく配るための正規化 */
+	p->cnorm_up = (p->carea > 0.0) ? (sup / p->carea) : 0.0;
+	p->cnorm_dn = (p->carea > 0.0) ? (sdn / p->carea) : 0.0;
+	if (sup > EPS) {
+		for (i = 0; i < n; i++) p->cffup[i] *= p->carea / sup;
+	}
+	if (sdn > EPS) {
+		for (i = 0; i < n; i++) p->cffdn[i] *= p->carea / sdn;
+	}
+
+	/* 壁パッチ間のビームが層へ預ける係数 */
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic)
+#endif
+	for (i = 0; i < n; i++) {
+		double *dep = &p->cdepw[(size_t)i * nl];
+		double *seg = (double *)xmalloc((size_t)nl * sizeof(double));
+		int     j;
+		for (j = 0; j < n; j++) {
+			const double f = p->ff[((size_t)i * n) + j];
+			if (f <= 0.0) continue;
+			canopy_deposit(p, p->patch[i].c, p->patch[j].c, f, dep, seg);
+		}
+		for (j = 0; j < nl; j++) dep[j] *= p->patch[i].area;
+		free(seg);
+	}
+	(void)m;
+}
+
+/*
+波長ビン il について、壁の放射発散度 B[] から群落の拡散場を解き、
+上面 / 下面から出る流束と層界面の流束を更新する。
+*aout に群落が吸収した放射束 [W] を返す。
+
+湧き出し Q_m = ω (光源ビームの預け入れ + Σ_i cdepw[i][m] B_i) / A_c
+*/
+void canopy_field(ppfd_t *p, int il, const double *B, double *aout, double *sout)
+{
+	const canopy_t *c = &p->canopy;
+	const int nl = c->nlayer;
+	const double omega = canopy_omega(p, il);
+	double *Q = (double *)xcalloc((size_t)nl, sizeof(double));
+	double *fdn = &p->cfdn[(size_t)il * (nl + 1)];
+	double *fup = &p->cfup[(size_t)il * (nl + 1)];
+	double  etop = 0.0, ebot = 0.0, adiff = 0.0, dsum = 0.0;
+	int     i, m;
+
+	for (m = 0; m < nl; m++) {
+		/* 総和の順序を固定する (スレッド数によらず同じ値にするため) */
+		double d = p->cdep[((size_t)m * p->nlam) + il];
+		for (i = 0; i < p->npatch; i++) {
+			d += p->cdepw[((size_t)i * nl) + m] * B[(size_t)i * p->nlam + il];
+		}
+		dsum += d;
+		Q[m] = (omega * d) / p->carea;
+	}
+
+	canopy_column(p, omega, Q, fdn, fup, &etop, &ebot, &adiff);
+
+	p->cbtop[il] = etop;
+	p->cbbot[il] = ebot;
+	/* 遮断分の (1-ω) が直接吸収、拡散場の吸収が adiff (どちらも W) */
+	*aout = ((1.0 - omega) * dsum) + (adiff * p->carea);
+	*sout = (etop + ebot) * p->carea;
+
+	free(Q);
+}
+
+/*
+群落内部の高さ z における上向き受光面の拡散放射照度 [W/m²]。
+層界面の下向き流束を線形内挿する (測定面は上向きの量子センサ)。
+*/
+double canopy_interior(const ppfd_t *p, int il, double z)
+{
+	const canopy_t *c = &p->canopy;
+	const int nl = c->nlayer;
+	const double *fdn = &p->cfdn[(size_t)il * (nl + 1)];
+	double f;
+	int    m;
+
+	if ((z >= c->ztop) || (z <= c->zbot)) return 0.0;
+	f = ((c->ztop - z) / (c->ztop - c->zbot)) * nl;
+	m = (int)f;
+	if (m < 0) m = 0;
+	if (m > nl - 1) m = nl - 1;
+	f -= m;
+	return (fdn[m] * (1.0 - f)) + (fdn[m + 1] * f);
+}
+
 /*
 1 本のカラムの層別二流を解く (外部からの拡散入射は無い : 外から来る光は
 すべてビームとして dep に預けられている)。
@@ -370,16 +523,16 @@ void canopy_column(const ppfd_t *p, double omega, const double *Q,
 	*etop = fup[0];
 	*ebot = fdn[n];
 
-	/* 吸収 = 入れたもの - 出たもの。(1-ω) を構造因子として持つ形で組む */
+	/*
+	吸収 = 入れたもの - 出たもの。カラムの収支そのものなので、層カーネルが
+	R+T+A=1 を満たす限りこれは厳密 (打ち消しではなく帳簿の残り)。
+	ω = 1 は「吸収が無い」ことが構造的に決まっているので明示的に 0 にする。
+	*/
 	{
-		double qsum = 0.0, absorb = 0.0;
-		for (m = 0; m < n; m++) {
-			/* 層 m へ入る拡散流束と自層の湧き出しに対する吸収 */
-			absorb += (A * (fdn[m] + fup[m + 1])) + ((1.0 - omega) * 2.0 * t * E * Q[m]);
-			qsum += Q[m];
-		}
-		(void)qsum;
-		*aabs = absorb;
+		double qsum = 0.0;
+		for (m = 0; m < n; m++) qsum += Q[m];
+		*aabs = (omega >= 1.0) ? 0.0 : (qsum - *etop - *ebot);
+		if (*aabs < 0.0) *aabs = 0.0;
 	}
 
 	free(Rb);

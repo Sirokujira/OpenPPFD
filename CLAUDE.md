@@ -20,7 +20,7 @@ V(λ) ではなく McCree 作用曲線、lm ではなく µmol/m²/s。この 2 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 
-# 検証 : 解析解・SI 定義値との比較 (全 37 判定)
+# 検証 : 解析解・SI 定義値との比較 (全 43 判定)
 sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
 ```
 
@@ -83,6 +83,11 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
   性質が `683 lm/W` の検証に効いているので崩さない。
 - 光量子換算係数 `PHOTON_K` は h, c, N_A の SI 定義値だけからなる厳密量。
   丸めた定数 (0.836 等) に置き換えない。
+- **群落の散乱は「素の遮断で運び、取り除いた分を配る」で組む**。現行の
+  減衰係数の `√(1-ω)` は素の遮断率ではなく二流方程式の減衰固有値なので、
+  これを据え置いたまま散乱を戻すと二重計上になる。`leafscatter = on` では
+  ビームを `k = G a` (波長非依存) で運び、`√(1-ω)` は解の固有値として
+  出力側に現れる。
 - **実測配光ファイル (IES/LDT) からは配光の形だけを取る**。記載の cd/lm
   は V(λ) 基準の測光量なので、SPD 抜きに放射束 [W] や PPF へは換算
   できない。放射束は入力ファイル側 (W 欄 / `ppf` / `lumens`) が決める。

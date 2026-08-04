@@ -22,6 +22,8 @@ void solve_radiosity(ppfd_t *p)
 	const int nl = p->nlam;
 	double  *M = NULL;
 	double  *Bold, *Bnew;
+	double  *Bfull = NULL;
+	const int scat = p->canopy.on && p->canopy.scatter;
 	int      il;
 	int      itermax = 0;
 	double   residmax = 0.0;
@@ -35,6 +37,7 @@ void solve_radiosity(ppfd_t *p)
 	}
 	Bold = (double *)xcalloc((size_t)n, sizeof(double));
 	Bnew = (double *)xcalloc((size_t)n, sizeof(double));
+	if (scat) Bfull = (double *)xcalloc((size_t)n * nl, sizeof(double));
 
 	for (il = 0; il < nl; il++) {
 		const double *F;
@@ -49,6 +52,12 @@ void solve_radiosity(ppfd_t *p)
 				break;
 			}
 		}
+		if (scat) {
+			int m;
+			for (m = 0; m < p->canopy.nlayer; m++) {
+				if (p->cdep[((size_t)m * nl) + il] > 0.0) active = 1;
+			}
+		}
 		if (!active) continue;
 
 		/* 反射率が全パッチで 0 なら相互反射は無い */
@@ -56,14 +65,11 @@ void solve_radiosity(ppfd_t *p)
 			const double r = p->mat[p->patch[i].imat].rho[il];
 			if (r > emax) emax = r;
 		}
-		if (emax <= 0.0) continue;
+		if ((emax <= 0.0) && !scat) continue;
 
 		if (p->canopy.on) {
-			double omega = p->mat[p->canopy.imat].rho[il] + p->mat[p->canopy.imat].tau[il];
 			int j;
-			if (omega < 0.0) omega = 0.0;
-			if (omega > 0.999) omega = 0.999;
-			kext = p->canopy.k0 * sqrt(1.0 - omega) * p->canopy.a;
+			kext = canopy_kext(p, il);
 #ifdef _OPENMP
 #pragma omp parallel for private(j) schedule(static)
 #endif
@@ -87,6 +93,18 @@ void solve_radiosity(ppfd_t *p)
 
 		for (iter = 0; iter < p->maxiter; iter++) {
 			double dmax = 0.0, bmax = 0.0;
+			double etop = 0.0, ebot = 0.0;
+
+			if (scat) {
+				/*
+				群落の拡散場を現在の B から解き直す。反復行列の一部として
+				扱うので、収束すれば直接光・壁・群落が同時に整合する。
+				*/
+				double aw = 0.0, sw = 0.0;
+				canopy_field(p, il, Bfull, &aw, &sw);
+				etop = p->cbtop[il];
+				ebot = p->cbbot[il];
+			}
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
@@ -98,6 +116,9 @@ void solve_radiosity(ppfd_t *p)
 				for (j = 0; j < n; j++) {
 					g += Fi[j] * Bold[j];
 				}
+				if (scat) {
+					g += (p->cffup[i] * etop) + (p->cffdn[i] * ebot);
+				}
 				Bnew[i] = p->mat[p->patch[i].imat].rho[il] * g;
 			}
 
@@ -106,6 +127,7 @@ void solve_radiosity(ppfd_t *p)
 				if (d > dmax) dmax = d;
 				if (Bnew[i] > bmax) bmax = Bnew[i];
 				Bold[i] = Bnew[i];
+				if (scat) Bfull[((size_t)i * nl) + il] = Bold[i];
 			}
 
 			if (iter + 1 > itermax) itermax = iter + 1;
@@ -120,6 +142,12 @@ void solve_radiosity(ppfd_t *p)
 		}
 
 		/* 入射放射照度 (エネルギー収支の診断に使う) */
+		if (scat) {
+			double aw = 0.0, sw = 0.0;
+			canopy_field(p, il, Bfull, &aw, &sw);
+			p->cabs[il] = aw;
+			p->cscat_out += sw;
+		}
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
@@ -129,6 +157,9 @@ void solve_radiosity(ppfd_t *p)
 			int    j;
 			for (j = 0; j < n; j++) {
 				g += Fi[j] * Bold[j];
+			}
+			if (scat) {
+				g += (p->cffup[i] * p->cbtop[il]) + (p->cffdn[i] * p->cbbot[il]);
 			}
 			p->Einc[((size_t)i * nl) + il] = g;
 			p->B[((size_t)i * nl) + il] = p->mat[p->patch[i].imat].rho[il] * g;
@@ -140,5 +171,6 @@ void solve_radiosity(ppfd_t *p)
 
 	free(Bold);
 	free(Bnew);
+	if (Bfull != NULL) free(Bfull);
 	if (M != NULL) free(M);
 }

@@ -252,12 +252,8 @@ void canopy_trans(const ppfd_t *p, double s, double *tr)
 		return;
 	}
 
+	(void)cp;
 	for (i = 0; i < p->nlam; i++) {
-		double omega = p->mat[cp->imat].rho[i] + p->mat[cp->imat].tau[i];
-		double kext;
-		if (omega < 0.0) omega = 0.0;
-		if (omega > 0.999) omega = 0.999;
-		kext = cp->k0 * sqrt(1.0 - omega) * cp->a;
-		tr[i] = exp(-kext * s);
+		tr[i] = exp(-canopy_kext(p, i) * s);
 	}
 }
