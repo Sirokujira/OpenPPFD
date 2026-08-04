@@ -118,6 +118,14 @@ typedef struct {
 	double  lam1, lam2;
 } band_t;
 
+/* ---- 遮蔽物 (棚板・トレイ・バッフル : 軸並行直方体) ----------------- */
+typedef struct {
+	char    name[NAMELEN];
+	double  x0, x1, y0, y1, z0, z1; /* 昇順に正規化済み。1 辺が 0 なら両面板 */
+	int     imat;                   /* 表面材料 */
+	int     ndivu, ndivv;           /* 1 面あたりの分割数 (0 = patchdiv に従う) */
+} occluder_t;
+
 /* ---- 群落 (Beer-Lambert 減衰スラブ) -------------------------------- */
 typedef struct {
 	int     on;
@@ -143,13 +151,14 @@ typedef struct {
 	int       ndivu, ndivv;         /* 1 面あたりの分割数 */
 
 	/* 入力テーブル */
-	int       nmat, nspec, nemit, ntarget, nband, ndist;
+	int       nmat, nspec, nemit, ntarget, nband, ndist, nocc;
 	pmat_t   *mat;
 	spec_t   *spec;
 	emitter_t *emit;
 	target_t *target;
 	band_t   *band;
 	photdist_t *dist;
+	occluder_t *occ;
 	canopy_t  canopy;
 
 	/* 解析条件 */
@@ -172,6 +181,8 @@ typedef struct {
 	/* 診断 */
 	double    ff_rowsum_err;        /* 行和 Σ_j F_ij の 1 からの最大偏差 */
 	double    ff_recip_err;         /* 相反則 A_i F_ij = A_j F_ji の最大相対誤差 */
+	int       ff_nblind;            /* 完全に囲まれて何も見えないパッチ数 (行和 = 0) */
+	int       ff_npartial;          /* 遮蔽が部分的で標本化に頼ったパッチ対の数 */
 	int       niter;
 	double    resid;
 	double    flux_total;           /* 全光源の放射束 [W] */
@@ -232,9 +243,12 @@ void    setup_patch(ppfd_t *);
 void    setup_target(ppfd_t *);
 double  canopy_path(const ppfd_t *, vec3_t, vec3_t);
 void    canopy_trans(const ppfd_t *, double, double *);
+int     occ_blocked(const ppfd_t *, vec3_t, vec3_t);
 
 /* formfactor.c */
 double  ff_point_poly(vec3_t, vec3_t, const vec3_t *, int);
+double  vis_point_patch(const ppfd_t *, vec3_t, const patch_t *, int *);
+double  vis_patch_patch(const ppfd_t *, const patch_t *, const patch_t *, int *);
 void    setup_ff(ppfd_t *);
 
 /* direct.c */

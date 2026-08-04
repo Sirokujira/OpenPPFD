@@ -17,8 +17,19 @@ formfactor.c
 誤差は受光側の求積のみ)。近接パッチは被積分関数の変化が急なので
 複合求積の分割数を上げる。
 
-キャビティが凸なので遮蔽判定は不要。同一面のパッチどうしは互いに
-見えないので明示的に 0 とする。
+同一平面のパッチどうしは互いに見えないので明示的に 0 とする。
+
+■ 遮蔽
+遮蔽物 (occluder キー) が無ければキャビティは凸なので遮蔽判定は要らず、
+F_ij は上の求積の精度で厳密になる。遮蔽物があるときは可視率
+
+    V_ij = (両パッチ上の標本点対のうち遮られない割合)
+
+を掛ける。まず 2×2 × 2×2 = 16 本の線分で判定し、全部同じ (完全に見える
+/ 完全に隠れる) ならそこで確定する — 棚板がキャビティを仕切るような
+配置ではすべての対がこれで確定し、遮蔽があっても F は厳密なままになる。
+判定が割れた対だけ 4×4 × 4×4 = 256 本へ細分する。この細分された対の
+数はログに出す (標本化に頼った = 厳密でない箇所がどれだけあったか)。
 */
 
 #include "ppfd.h"
@@ -127,10 +138,85 @@ static double patch_size(const patch_t *q)
 	return v_norm(v_sub(q->p[2], q->p[0]));
 }
 
+/* パッチ上の層化標本点 (nsub × nsub の小矩形の中心) */
+static vec3_t patch_sample(const patch_t *q, int iu, int iv, int nsub)
+{
+	const vec3_t eu = v_sub(q->p[1], q->p[0]);
+	const vec3_t ev = v_sub(q->p[3], q->p[0]);
+	const double u = ((double)iu + 0.5) / nsub;
+	const double v = ((double)iv + 0.5) / nsub;
+
+	return v_add(q->p[0], v_add(v_scale(eu, u), v_scale(ev, v)));
+}
+
+/*
+点 x からパッチ q の可視率 (0..1)。遮蔽物が無ければ 1。
+判定が割れたら細分し、そのとき *refined を 1 にする (診断用)。
+*/
+double vis_point_patch(const ppfd_t *p, vec3_t x, const patch_t *q, int *refined)
+{
+	int nsub, pass;
+
+	if (p->nocc == 0) return 1.0;
+
+	for (pass = 0; pass < 2; pass++) {
+		int nvis = 0, ntot = 0, ju, jv;
+		nsub = (pass == 0) ? 2 : 4;
+		for (jv = 0; jv < nsub; jv++) {
+			for (ju = 0; ju < nsub; ju++) {
+				ntot++;
+				if (!occ_blocked(p, x, patch_sample(q, ju, jv, nsub))) nvis++;
+			}
+		}
+		if ((nvis == 0) || (nvis == ntot) || (pass == 1)) {
+			if ((pass == 1) && (refined != NULL)) *refined = 1;
+			return (double)nvis / ntot;
+		}
+	}
+	return 1.0;
+}
+
+/* パッチ i からパッチ j の可視率 (0..1)。遮蔽物が無ければ 1 */
+double vis_patch_patch(const ppfd_t *p, const patch_t *qi, const patch_t *qj, int *refined)
+{
+	int nsub, pass;
+
+	if (p->nocc == 0) return 1.0;
+
+	for (pass = 0; pass < 2; pass++) {
+		int nvis = 0, ntot = 0, iu, iv, ju, jv;
+		nsub = (pass == 0) ? 2 : 4;
+		for (iv = 0; iv < nsub; iv++) {
+			for (iu = 0; iu < nsub; iu++) {
+				const vec3_t si = patch_sample(qi, iu, iv, nsub);
+				for (jv = 0; jv < nsub; jv++) {
+					for (ju = 0; ju < nsub; ju++) {
+						ntot++;
+						if (!occ_blocked(p, si, patch_sample(qj, ju, jv, nsub))) nvis++;
+					}
+				}
+			}
+		}
+		if ((nvis == 0) || (nvis == ntot) || (pass == 1)) {
+			if ((pass == 1) && (refined != NULL)) *refined = 1;
+			return (double)nvis / ntot;
+		}
+	}
+	return 1.0;
+}
+
+/* 2 つのパッチが同一平面にあるか (互いに見えない) */
+static int coplanar(const patch_t *a, const patch_t *b)
+{
+	if (fabs(v_dot(a->n, b->n)) < (1.0 - 1e-12)) return 0;
+	return (fabs(v_dot(a->n, v_sub(b->c, a->c))) < 1e-9);
+}
+
 void setup_ff(ppfd_t *p)
 {
 	const int n = p->npatch;
 	int    i;
+	int    npartial = 0;
 
 	p->ff = (double *)xcalloc((size_t)n * n, sizeof(double));
 	if (p->canopy.on) {
@@ -138,7 +224,7 @@ void setup_ff(ppfd_t *p)
 	}
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(dynamic) reduction(+:npartial)
 #endif
 	for (i = 0; i < n; i++) {
 		int    j;
@@ -149,15 +235,20 @@ void setup_ff(ppfd_t *p)
 
 		for (j = 0; j < n; j++) {
 			const patch_t *qj = &p->patch[j];
-			double dist, sj, f;
-			int    msub, nq, g;
+			double dist, sj, f, vis;
+			int    msub, nq, g, refined = 0;
 
 			if (i == j) continue;
-			if (qi->iface == qj->iface) continue;   /* 同一平面 : 互いに見えない */
+			if (qi->iface == qj->iface) continue;   /* 同一面 : 互いに見えない */
+			if (coplanar(qi, qj)) continue;         /* 同一平面 (遮蔽物と壁の接触等) */
 
 			if (p->plen != NULL) {
 				p->plen[((size_t)i * n) + j] = (float)canopy_path(p, qi->c, qj->c);
 			}
+
+			vis = vis_patch_patch(p, qi, qj, &refined);
+			npartial += refined;
+			if (vis <= 0.0) continue;
 
 			sj = patch_size(qj);
 			dist = v_norm(v_sub(qj->c, qi->c));
@@ -167,20 +258,34 @@ void setup_ff(ppfd_t *p)
 
 			f = 0.0;
 			for (g = 0; g < nq; g++) {
+				/*
+				放射側の向きの判定 : 求積点が qj の裏側にあるなら qj の
+				表面は見えない。ff_point_poly は受光側の法線しか見ないので
+				ここで落とす必要がある (凸キャビティだけなら常に真だが、
+				遮蔽物の表裏の面は同じ多角形を共有するため必須)。
+				*/
+				if (v_dot(qj->n, v_sub(xs[g], qj->p[0])) <= 0.0) continue;
 				f += ws[g] * ff_point_poly(xs[g], qi->n, qj->p, 4);
 			}
-			p->ff[((size_t)i * n) + j] = f;
+			p->ff[((size_t)i * n) + j] = f * vis;
 		}
 	}
+	p->ff_npartial = npartial;
 
-	/* 診断 : 閉キャビティなら行和 = 1、相反則 A_i F_ij = A_j F_ji */
+	/*
+	診断 : 閉じた面の集合なら行和 = 1、相反則 A_i F_ij = A_j F_ji。
+	遮蔽物が壁と接して完全に囲まれたパッチ (何も見えない) は行和 0 に
+	なるが、そこには光も入らないので収支には効かない。数だけ数えて
+	行和の判定からは外す。
+	*/
 	{
 		double emax = 0.0, rmax = 0.0;
-		int    j;
+		int    j, nblind = 0;
 		for (i = 0; i < n; i++) {
 			double s = 0.0;
 			for (j = 0; j < n; j++) s += p->ff[((size_t)i * n) + j];
-			if (fabs(s - 1.0) > emax) emax = fabs(s - 1.0);
+			if (s <= 0.0) nblind++;
+			else if (fabs(s - 1.0) > emax) emax = fabs(s - 1.0);
 			for (j = i + 1; j < n; j++) {
 				const double a = p->patch[i].area * p->ff[((size_t)i * n) + j];
 				const double b = p->patch[j].area * p->ff[((size_t)j * n) + i];
@@ -193,5 +298,6 @@ void setup_ff(ppfd_t *p)
 		}
 		p->ff_rowsum_err = emax;
 		p->ff_recip_err = rmax;
+		p->ff_nblind = nblind;
 	}
 }

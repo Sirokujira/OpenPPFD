@@ -56,11 +56,16 @@ static void gather_target(ppfd_t *p)
 			direct_point(p, x, nz, E);
 
 			for (ip = 0; ip < n; ip++) {
-				const double f = ff_point_poly(x, nz, p->patch[ip].p, 4);
+				const patch_t *q = &p->patch[ip];
 				const double *B = &p->B[(size_t)ip * nl];
-				double s;
+				double f, s;
+				/* パッチの表側から見ているか (遮蔽物の裏面を拾わないため) */
+				if (v_dot(q->n, v_sub(x, q->p[0])) <= 0.0) continue;
+				f = ff_point_poly(x, nz, q->p, 4);
 				if (f <= 0.0) continue;
-				s = canopy_path(p, x, p->patch[ip].c);
+				f *= vis_point_patch(p, x, q, NULL);
+				if (f <= 0.0) continue;
+				s = canopy_path(p, x, q->c);
 				if (s > 0.0) {
 					for (il = 0; il < nl; il++) {
 						E[il] += B[il] * f * exp(-kext[il] * s);
@@ -123,12 +128,18 @@ void solve(ppfd_t *p)
 	t0 = cputime();
 	setup_patch(p);
 	setup_target(p);
-	plog(p, "patches = %d (%d faces x %d x %d), spectral bins = %d\n",
-		p->npatch, 6, p->ndivu, p->ndivv, p->nlam);
+	plog(p, "patches = %d (chamber %d x %d x %d, occluders %d), spectral bins = %d\n",
+		p->npatch, 6, p->ndivu, p->ndivv,
+		p->npatch - (6 * p->ndivu * p->ndivv), p->nlam);
 
 	setup_ff(p);
 	plog(p, "form factor : row sum error = %.3e, reciprocity error = %.3e  (%.2f s)\n",
 		p->ff_rowsum_err, p->ff_recip_err, cputime() - t0);
+	if (p->nocc > 0) {
+		/* 遮蔽が部分的な対だけは標本化 (= 厳密でない) なので数を出す */
+		plog(p, "occluders   : %d, partially shadowed patch pairs = %d, enclosed patches = %d\n",
+			p->nocc, p->ff_npartial, p->ff_nblind);
+	}
 
 	t0 = cputime();
 	direct_patch(p);

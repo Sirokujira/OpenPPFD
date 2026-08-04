@@ -223,6 +223,44 @@ run unit_lm.ppfd
 chk "flux from lumens"     "$(logval 'radiant flux')" 1.0 1e-6
 
 echo
+echo "== (h) occluders (shelves / baffles) =="
+# (h-1) 断面いっぱいの棚板で 2 室に仕切る : 下室は真っ暗、収支は閉じたまま
+run shelf.ppfd
+chk "shelf: absorbed by walls"  "$(logval 'absorbed by walls')" 1.0 1e-4
+# 全パッチ面積 8 m2 (チャンバ 6 + 棚板の表裏 2)、rho = 0.8
+chk "shelf: mean irradiance"    "$(logval 'mean wall irrad.')" \
+	"$(awk 'BEGIN {printf "%.9g", 1.0 / (0.2 * 8.0)}')" 1e-4
+chkabs "shelf: sealed (lower=0)" "$(awk -F, 'NR == 3 {print $7}' "$WORK/ppfd_summary.csv")" 0
+# 遮蔽が完全に 2 値なので形態係数は厳密なまま (標本化に落ちた対が 0)
+chkabs "shelf: exact visibility" \
+	"$(awk -F'=' '/partially shadowed/ {split($2, f, ","); print f[1]}' "$WORK/ppfd.log")" 0
+chkabs "shelf: ff row sum"      "$(awk -F'=' '/row sum error/ {split($2, f, ","); print f[1]}' "$WORK/ppfd.log")" 1e-6
+
+# (h-2) 点光源 + 小さな板の本影 : 影の中は厳密に 0、影の外は逆二乗則
+run shadow.ppfd
+chkabs "shadow: umbra is dark"  "$(cell ppfd_map_floor.csv 5 5 5)" 0
+# 影の外のセル (ix=0, iy=5) : E = (Phi/pi) h^2/(h^2+r^2)^2, h=0.9, r=0.4545455
+E4=$(awk -v k="$KPH555" 'BEGIN {
+	pi = 4 * atan2(1, 1); h = 0.9; r = 0.5 - 0.5 / 11;
+	printf "%.9g", (1.0 / pi) * h * h / ((h * h + r * r) ^ 2) * k
+}')
+chk "shadow: lit cell"          "$(cell ppfd_map_floor.csv 0 5 5)" "$E4" 2e-3
+# 影に隠れた分は板が吸収するので収支は閉じる (影の境界の求積誤差だけ残る)
+chkabs "shadow: closure"        "$(logval 'closure error')" 1e-3
+
+# (h-3) 2 段ラック : 棚板で仕切った段どうしは完全に独立になる。
+# 下段の LED を消しても上段の分布は 1 ビットも変わらず、下段は真っ暗になる。
+run rack2.ppfd
+cp "$WORK/ppfd_map_tier2.csv" "$WORK/map_tier2.csv"
+awk -F, 'NR == 3 {printf "%-28s tier1 (lower, with LEDs) = %.4g umol/m2/s -> %s\n", \
+	"rack2 lower tier lit", $5, ($5 > 0) ? "OK" : "NG"; exit ($5 > 0) ? 0 : 1}' \
+	"$WORK/ppfd_summary.csv" || status=1
+sed '/^array = 0.1 0.15 0.40/d' "$SRC/rack2.ppfd" > "$WORK/rack2_top.ppfd"
+run rack2_top.ppfd
+chkabs "rack2: tiers independent" "$(maxdiff map_tier2.csv ppfd_map_tier2.csv)" 1e-6
+chkabs "rack2: lower tier dark"   "$(awk -F, 'NR == 3 {print $7}' "$WORK/ppfd_summary.csv")" 0
+
+echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2
 else

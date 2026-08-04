@@ -26,6 +26,12 @@ input_data.c
 		} \
 	} while (0)
 
+/* 昇順に並べ替える (遮蔽物の範囲指定はどちら向きでもよい) */
+#define SORT2(a, b) \
+	do { \
+		if ((a) > (b)) { const double t_ = (a); (a) = (b); (b) = t_; } \
+	} while (0)
+
 int find_mat(const ppfd_t *p, const char *name)
 {
 	int i;
@@ -461,7 +467,7 @@ int input_data(FILE *fp, ppfd_t *p)
 	char   strline[BUFSIZ], strsave[BUFSIZ];
 	char  *token[MAXTOKEN];
 	const char sep[] = " \t";
-	int    cmat = 0, cspec = 0, cemit = 0, ctarget = 0, cband = 0;
+	int    cmat = 0, cspec = 0, cemit = 0, ctarget = 0, cband = 0, cocc = 0;
 	int    i;
 	double *ax_lam = NULL, *ax_v = NULL, *ax_v2 = NULL;
 	int    nax = 0;
@@ -719,6 +725,48 @@ int input_data(FILE *fp, ppfd_t *p)
 			}
 			APPEND(p->target, p->ntarget, ctarget, target_t);
 			p->target[p->ntarget++] = t;
+		}
+		else if (!strcmp(token[0], "occluder")) {
+			/* occluder = name x0 x1 y0 y1 z0 z1 material [div nu nv] */
+			occluder_t o;
+			int im;
+			if (ntok < 10) { fprintf(stderr, "*** invalid occluder data\n"); ierr = 1; continue; }
+			memset(&o, 0, sizeof(o));
+			strncpy(o.name, token[2], NAMELEN - 1);
+			o.x0 = atof(token[3]);  o.x1 = atof(token[4]);
+			o.y0 = atof(token[5]);  o.y1 = atof(token[6]);
+			o.z0 = atof(token[7]);  o.z1 = atof(token[8]);
+			SORT2(o.x0, o.x1);
+			SORT2(o.y0, o.y1);
+			SORT2(o.z0, o.z1);
+			im = find_mat(p, token[9]);
+			if (im < 0) {
+				fprintf(stderr, "*** unknown material : %s\n", token[9]);
+				ierr = 1;
+				continue;
+			}
+			o.imat = im;
+			if ((ntok >= 13) && streq_ci(token[10], "div")) {
+				o.ndivu = atoi(token[11]);
+				o.ndivv = atoi(token[12]);
+			}
+			if (((o.x1 - o.x0) <= 0.0) && ((o.y1 - o.y0) <= 0.0)) {
+				fprintf(stderr, "*** invalid occluder data (degenerate in 2 axes)\n");
+				ierr = 1;
+				continue;
+			}
+			if (((o.x1 - o.x0) <= 0.0) && ((o.z1 - o.z0) <= 0.0)) {
+				fprintf(stderr, "*** invalid occluder data (degenerate in 2 axes)\n");
+				ierr = 1;
+				continue;
+			}
+			if (((o.y1 - o.y0) <= 0.0) && ((o.z1 - o.z0) <= 0.0)) {
+				fprintf(stderr, "*** invalid occluder data (degenerate in 2 axes)\n");
+				ierr = 1;
+				continue;
+			}
+			APPEND(p->occ, p->nocc, cocc, occluder_t);
+			p->occ[p->nocc++] = o;
 		}
 		else if (!strcmp(token[0], "canopy")) {
 			int im;

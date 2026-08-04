@@ -1,0 +1,46 @@
+# 検証 (h-1) 棚板でキャビティを 2 室に仕切る (遮蔽ありの相互反射)
+#
+# 1.0 x 1.0 x 1.0 m の拡散反射キャビティ (rho = 0.8) の z = 0.5 に、
+# 断面いっぱいの厚さ 0 の棚板を張って上下 2 室に完全に仕切る。
+# 光源は上室の中央 (等方 1 W)。
+#
+# 期待値 (いずれも厳密)
+#   1. 下室には光が 1 光子も入らない  -> target "lower" の PPFD = 0
+#   2. 全放射束が表面に吸収される     -> absorbed by walls = 1 W
+#      (棚板もラジオシティに参加するので収支は閉じたまま)
+#   3. 一様反射率なら Sum_i A_i E_i = Phi/(1-rho) が厳密に成り立つ。
+#      ログの "mean wall irrad." は全パッチ面積で割った値なので
+#          (1/(1-0.8)) / A_all = 5 / 8 = 0.625 W/m^2
+#      A_all = チャンバ 6 面 (6 m^2) + 棚板の表裏 (2 m^2) = 8 m^2
+#
+# patchdiv = 6 は z = 0.5 が側壁パッチの境界に乗るように選んである
+# (パッチが棚板をまたぐと、そのパッチ 1 枚を通して光が下室へ漏れる)。
+#
+# 遮蔽が完全に 2 値 (どの対も「全部見える」か「全部見えない」) に
+# なる配置なので、形態係数は遮蔽があっても厳密なまま。ログの
+# "partially shadowed patch pairs" が 0 であることがその証拠。
+
+OpenPPFD 1 0
+title = shelf splitting the cavity into two sealed compartments (analytic)
+
+wavelength = 380 780 5
+chamber    = 1.0 1.0 1.0
+patchdiv   = 6 6
+
+material = white gray 0.8
+wall     = all white
+
+# 厚さ 0 の板 (z0 = z1)。表裏 2 面がパッチになる。
+occluder = plate 0.0 1.0 0.0 1.0 0.5 0.5 white
+
+spectrum = na555 mono 555
+
+led = 0.5 0.5 0.75 1.0 na555 iso
+
+target = upper 0.60 11 11
+target = lower 0.25 11 11
+
+photoperiod = 16
+solver      = 500 1e-9
+
+end
