@@ -32,6 +32,7 @@ PPFD / YPFD / ePAR / DLI / 照度 / R:FR / 均斉度。
 | `include/ppfd.h` | 定数・構造体 (`ppfd_t`)・全プロトタイプ |
 | `src/input_data.c` | `.ppfd` テキストのパース (2 パス: 分光グリッド確定 → 本体) |
 | `src/spectrum.c` | 分光グリッド、McCree / V(λ)、PPFD・YPFD・lx への換算 |
+| `src/photometry.c` | 実測配光ファイル (IES LM-63 / EULUMDAT) の読み込みと補間 |
 | `src/geometry.c` | 壁パッチ分割、測定面、群落スラブの経路長・透過率 |
 | `src/formfactor.c` | 微小面→多角形の閉形式形態係数、パッチ間形態係数 |
 | `src/direct.c` | 光源→パッチ / 任意点の直接放射照度 |
@@ -100,6 +101,11 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
   性質が `1 W @555nm → 683 lm` の検証に効いているので崩さない。
 - 光量子換算係数 `PHOTON_K` は h, c, N_A の SI 定義値だけからなる厳密量
   (λ[nm] × 8.359346e-3 µmol/J)。丸めた定数に置き換えない。
+- **実測配光ファイル (IES/LDT) からは配光の形だけを取る**。記載の cd/lm
+  は測光量なので、SPD 抜きに放射束 [W] や PPF へは換算できない。
+  放射束は入力ファイル側 (W 欄 / `ppf` / `lumens`) が決める。配光は
+  `∫Î dΩ = 1` へ**厳密に**正規化する (台形則で近似するとその誤差が
+  そのまま放射束の誤差になり `closure error` を汚す)。
 
 ## 検証ケース一覧 (`ppfd_check.sh`)
 
@@ -110,6 +116,7 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
 | `canopy.ppfd` | Beer-Lambert 減衰 exp(−G·LAI) を 2 通りの G で |
 | `panel.ppfd` | 面光源分割の収束 (矩形形態係数の閉形式) |
 | `unit625.ppfd` | 作用曲線の正規化点で YPFD = PPFD (曲線の値に依存しない) |
+| `photometry.ppfd` | 実測配光ファイル : 放射束の保存、等方/Lambert 配光の解析解との一致、C 面の向き、IES と EULUMDAT の一致、`rot` の作用、カタログ値 (`ppf`/`lumens`) からの換算 |
 | `rack.ppfd` | 実用例の単調性 (群落を通ると PPFD と R:FR が下がる) |
 
 ## CI

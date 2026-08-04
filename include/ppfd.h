@@ -64,15 +64,31 @@ typedef struct {
 	int     i0, i1;                 /* w != 0 のビン範囲 (両端含む)。内側ループの短縮用 */
 } spec_t;
 
+/* ---- 実測配光 (IESNA LM-63 / EULUMDAT) ----------------------------- */
+typedef struct {
+	char    path[256];              /* ファイルパス (重複読み込みの判定にも使う) */
+	int     isldt;                  /* 0 = IES, 1 = EULUMDAT */
+	int     ptype;                  /* IES の光度分布型 (1 = type C) */
+	int     ng, nc;                 /* 鉛直角 γ の数 / 水平角 C の数 (1 = 回転対称) */
+	double *gam;                    /* [ng] γ [deg] 昇順、0 = 配光軸方向 */
+	double *cpl;                    /* [nc] C [deg] 昇順 0..360 (対称性を展開済み) */
+	double *I;                      /* [nc*ng] 相対光度 [1/sr]、∫I dΩ = 1 に正規化 */
+	double  lm;                     /* ファイル記載の光度から求めた光束 [lm] (参考値) */
+	double  watt;                   /* ファイル記載の消費電力 [W] (参考値) */
+} photdist_t;
+
 /* ---- 光源 --------------------------------------------------------- */
 typedef struct {
 	vec3_t  pos;                    /* 中心位置 [m] */
 	vec3_t  dir;                    /* 配光軸 (単位ベクトル) */
 	vec3_t  ax, ay;                 /* 面光源のローカル軸 (単位ベクトル) */
+	vec3_t  cx, cy;                 /* 配光ファイルの C 面基準 (C=0 が cx、C=90 が cy) */
 	double  flux;                   /* 放射束 [W] */
 	double  watt;                   /* 消費電力 [W] (0 = 未指定) */
 	int     ispec;                  /* スペクトル番号 */
 	double  mexp;                   /* 配光 I(θ) ∝ cos^m θ (m<0 = 等方) */
+	int     idist;                  /* 実測配光番号 (-1 = cos^m の解析形) */
+	double  crot;                   /* 配光軸まわりの回転 [deg] */
 	double  wsize, hsize;           /* 面光源の寸法 [m] (0 = 点光源) */
 	int     nu, nv;                 /* 面光源の分割数 */
 } emitter_t;
@@ -127,12 +143,13 @@ typedef struct {
 	int       ndivu, ndivv;         /* 1 面あたりの分割数 */
 
 	/* 入力テーブル */
-	int       nmat, nspec, nemit, ntarget, nband;
+	int       nmat, nspec, nemit, ntarget, nband, ndist;
 	pmat_t   *mat;
 	spec_t   *spec;
 	emitter_t *emit;
 	target_t *target;
 	band_t   *band;
+	photdist_t *dist;
 	canopy_t  canopy;
 
 	/* 解析条件 */
@@ -200,6 +217,10 @@ double  calc_epar(const ppfd_t *, const double *);
 double  calc_lux(const ppfd_t *, const double *);
 double  calc_bandppf(const ppfd_t *, const double *, double, double);
 double  calc_irradiance(const ppfd_t *, const double *);
+
+/* photometry.c */
+int     photdist_load(ppfd_t *, const char *, int);
+double  photdist_value(const photdist_t *, double, double);
 
 /* input_data.c */
 int     input_data(FILE *, ppfd_t *);

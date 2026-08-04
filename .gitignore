@@ -1,7 +1,7 @@
-build/
 bin/
 *.o
 *.obj
 *.exe
 ppfd.log
 ppfd_*.csv
+build*/

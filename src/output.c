@@ -80,6 +80,17 @@ void output_log(ppfd_t *p)
 			p->canopy.zbot, p->canopy.ztop, p->canopy.lai, p->canopy.k0,
 			p->mat[p->canopy.imat].name);
 	}
+	for (ie = 0; ie < p->ndist; ie++) {
+		const photdist_t *d = &p->dist[ie];
+		plog(p, "photometry   : %s (%s, %d x %d angles",
+			d->path, d->isldt ? "EULUMDAT" : "IES LM-63", d->nc, d->ng);
+		if (d->lm > 0.0) plog(p, ", rated %.4g lm", d->lm);
+		if (d->watt > 0.0) plog(p, ", %.4g W", d->watt);
+		plog(p, ") -- shape only, flux taken from the input file\n");
+		if (!d->isldt && (d->ptype != 1)) {
+			plog(p, "  * warning : photometric type %d is not type C; treated as type C\n", d->ptype);
+		}
+	}
 
 	/* 光源側の総量 */
 	for (ie = 0; ie < p->nemit; ie++) {

@@ -20,6 +20,7 @@ fi
 
 mkdir -p "$WORK"
 cp "$SRC"/*.ppfd "$WORK/"
+cp "$SRC"/*.ies "$SRC"/*.ldt "$WORK/"
 status=0
 
 # 555 nm の光子換算係数 [umol/J] = 555 * 1e-3 / (h c N_A)
@@ -62,6 +63,23 @@ cell() {
 # sumval <列番号> : ppfd_summary.csv の 1 行目 (最初の target)
 sumval() {
 	awk -F, -v c="$1" 'NR == 2 {print $c; exit}' "$WORK/ppfd_summary.csv"
+}
+
+# maxdiff <map1.csv> <map2.csv> [1] : PPFD 列の最大相対差。
+# 第 3 引数 1 で 2 番目の表の (ix, iy) を入れ替えて比較する (90 度回転の判定用)。
+maxdiff() {
+	awk -F, -v tr="$3" '
+		FNR == NR { if (FNR > 1) a[$1 "," $2] = $5; next }
+		FNR > 1 {
+			k = (tr == "1") ? ($2 "," $1) : ($1 "," $2)
+			if (k in a) {
+				d = a[k] - $5; if (d < 0) d = -d
+				m = (a[k] > $5) ? a[k] : $5
+				if (m > 0 && d / m > x) x = d / m
+			}
+		}
+		END {printf "%.3e", x}
+	' "$WORK/$1" "$WORK/$2"
 }
 
 echo "== (a) unit conversion / inverse square law =="
@@ -153,6 +171,56 @@ awk -v t="$RTOP" -v b="$RBASE" -v ft="$FRTOP" -v fb="$FRBASE" 'BEGIN {
 	printf "%-28s -> %s (PPFD and R:FR must fall through the canopy)\n", "rack monotonicity", ok ? "OK" : "NG";
 	exit ok ? 0 : 1
 }' || status=1
+
+echo
+echo "== (g) photometric distribution files (IES LM-63 / EULUMDAT) =="
+# 配光ファイルは形だけを与え、放射束は入力ファイルの W 欄から取る。
+# したがって配光によらず PPF は保存される。
+run photometry.ppfd
+chk "IES flux conservation"   "$(logval 'PPF (400-700nm)')" "$KPH555" 1e-4
+# 等方配光 : E = Phi/(4 pi h^2), h = 0.5  ("iso" オプションと同じ)
+EI=$(awk -v k="$KPH555" 'BEGIN {h = 0.5; printf "%.9g", k / (16 * atan2(1, 1) * h * h)}')
+chk "IES isotropic at r=0"    "$(cell ppfd_map_floor.csv 10 10 5)" "$EI" 2e-3
+cp "$WORK/ppfd_map_floor.csv" "$WORK/map_ies_iso.csv"
+
+# Lambert 配光 (1 deg 刻みの表) : "beam 1" の解析解と一致する
+sed 's/ies iso\.ies/ies lambert.ies/' "$SRC/photometry.ppfd" > "$WORK/phot_lambert.ppfd"
+run phot_lambert.ppfd
+chk "IES Lambertian at r=0"   "$(cell ppfd_map_floor.csv 10 10 5)" "$E0" 2e-3
+
+# 同じ配光を EULUMDAT (Isym=1) で書いたもの : IES と一致するはず
+sed 's/ies iso\.ies/ldt iso.ldt/' "$SRC/photometry.ppfd" > "$WORK/phot_ldt.ppfd"
+run phot_ldt.ppfd
+chkabs "EULUMDAT == IES (iso)"  "$(maxdiff map_ies_iso.csv ppfd_map_floor.csv)" 1e-6
+
+# 非対称配光 I ~ cos(gamma) (1 + 0.6 sin(gamma) cos 2C) : IES (C 面 0-90 の
+# 4 分の 1 対称) と EULUMDAT (Isym=4) の一致、C=0 が +x であること、
+# rot 90 で床面分布が転置されること、放射束が保存されること。
+sed 's/ies iso\.ies/ies asym.ies/' "$SRC/photometry.ppfd" > "$WORK/phot_asym.ppfd"
+run phot_asym.ppfd
+cp "$WORK/ppfd_map_floor.csv" "$WORK/map_asym.csv"
+# 中心から等距離の 2 セル (+x 方向と +y 方向) の比 = (1 + 0.6 s)/(1 - 0.6 s)
+chk "asym C=0 (+x) vs C=90"   "$(awk -v a="$(cell map_asym.csv 20 10 5)" -v b="$(cell map_asym.csv 10 20 5)" \
+	'BEGIN {printf "%.9g", a / b}')" \
+	"$(awk 'BEGIN {r = 20.5 / 21 - 0.5; s = r / sqrt((r * r) + 0.25);
+		printf "%.9g", (1 + 0.6 * s) / (1 - 0.6 * s)}')" 2e-3
+# 配光ファイルの正規化 (∫ I dOmega = 1) が厳密でなければ収支がずれる
+chkabs "IES closure (normalise)" "$(logval 'closure error')" 1e-6
+sed 's/ies iso\.ies/ldt asym.ldt/' "$SRC/photometry.ppfd" > "$WORK/phot_asym_ldt.ppfd"
+run phot_asym_ldt.ppfd
+chkabs "EULUMDAT == IES (asym)"  "$(maxdiff map_asym.csv ppfd_map_floor.csv)" 1e-6
+sed 's/ies iso\.ies/ies asym.ies rot 90/' "$SRC/photometry.ppfd" > "$WORK/phot_rot.ppfd"
+run phot_rot.ppfd
+chkabs "rot 90 transposes map"   "$(maxdiff map_asym.csv ppfd_map_floor.csv 1)" 1e-6
+
+# カタログ値 (PPF [umol/s] / 光束 [lm]) からの放射束換算。
+# 555 nm 単色なら lumens 683 がちょうど 1 W。
+sed 's/input 1\.0/input 1.0 ppf 10/' "$SRC/unit.ppfd" > "$WORK/unit_ppf.ppfd"
+run unit_ppf.ppfd
+chk "flux from ppf"        "$(logval 'PPF (400-700nm)')" 10.0 1e-6
+sed 's/input 1\.0/input 1.0 lumens 683/' "$SRC/unit.ppfd" > "$WORK/unit_lm.ppfd"
+run unit_lm.ppfd
+chk "flux from lumens"     "$(logval 'radiant flux')" 1.0 1e-6
 
 echo
 if [ "$status" -ne 0 ]; then

@@ -10,6 +10,10 @@ m = 1 が Lambert 配光 I = (Φ/π) cosθ、m = 0 が半球一様、m < 0 は�
     I = Φ/(4π)
 を表す。∫I dΩ = Φ は m によらず満たされる。
 
+実測配光ファイル (IES LM-63 / EULUMDAT) を与えた場合は
+    I(γ, C) = Φ Î(γ, C)          ∫ Î dΩ = 1
+の Î を photometry.c から引く。こちらも放射束は厳密に保存される。
+
 ■ 面光源
 寸法 w × h の平面 Lambert 光源は nu × nv 個の点光源に分割し、各々に
 Φ/(nu·nv) を与える。分割数 → ∞ で軸上放射照度は解析解
@@ -64,7 +68,18 @@ void direct_point(const ppfd_t *p, vec3_t x, vec3_t n, double *E)
 				cr = -v_dot(n, r) / d;          /* 受光面が光源を向く向き */
 				if (cr <= 0.0) continue;
 
-				if (e->mexp < 0.0) {
+				if (e->idist >= 0) {
+					/* 実測配光 : Î は ∫Î dΩ = 1 に正規化済みなので I = Φ Î */
+					const vec3_t u = v_scale(r, 1.0 / d);
+					double cg = v_dot(u, e->dir);
+					double ca;
+					if (cg > 1.0) cg = 1.0;
+					if (cg < -1.0) cg = -1.0;
+					ca = atan2(v_dot(u, e->cy), v_dot(u, e->cx)) * (180.0 / PI) - e->crot;
+					inten = fsub * photdist_value(&p->dist[e->idist], acos(cg) * (180.0 / PI), ca);
+					if (inten <= 0.0) continue;
+				}
+				else if (e->mexp < 0.0) {
 					inten = fsub / (4.0 * PI);
 				}
 				else {
