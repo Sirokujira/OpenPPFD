@@ -1,0 +1,119 @@
+# AGENTS.md — OpenPPFD
+
+`CLAUDE.md` と同じ規約を、単独で読める形にまとめたもの
+(`CLAUDE.md` / `.claude/` を読まないエージェント向け)。
+**規約を変えたら両方直すこと。**
+
+## このリポジトリは何か
+
+植物工場照明 (PPFD / スペクトル / 輻射伝達) ソルバー (C 言語、
+バイナリ `oppfd`)。[OpenFDTD](https://github.com/Sirokujira/OpenFDTD) の
+姉妹プロジェクトで、ビルド規約・移植性規則を共有する。外部ライブラリ
+(HDF5/LAPACK/BLAS) に依存しない。
+
+処理内容: 直方体チャンバの直接光 → 壁面ラジオシティ相互反射 →
+群落 (葉群) の Beer-Lambert 減衰 → 測定面ごとの
+PPFD / YPFD / ePAR / DLI / 照度 / R:FR / 均斉度。
+
+### 前提として崩してはいけない 2 点
+
+1. **波動光学ではない。** FDTD (OpenFDTD) や RCWA (OpenRCWA) が扱う
+   回折・干渉ではなく、光線・輻射伝達の問題として解く。
+2. **一般照明の測光量では評価できない。** 一般照明は lm / lx / lm/W
+   (標準比視感度 V(λ)、緑 555nm ピーク) だが、光合成は 400-700nm の
+   光子を数え (PPFD [µmol/m²/s])、量子収率は McCree 作用曲線
+   (赤 600-680nm ピーク) に従う。赤主体の園芸用 LED は lm/W では低く
+   µmol/J では高い。**両方を必ず並べて出力する。**
+
+## ディレクトリ構成
+
+| パス | 役割 |
+|---|---|
+| `include/ppfd.h` | 定数・構造体 (`ppfd_t`)・全プロトタイプ |
+| `src/input_data.c` | `.ppfd` テキストのパース (2 パス: 分光グリッド確定 → 本体) |
+| `src/spectrum.c` | 分光グリッド、McCree / V(λ)、PPFD・YPFD・lx への換算 |
+| `src/geometry.c` | 壁パッチ分割、測定面、群落スラブの経路長・透過率 |
+| `src/formfactor.c` | 微小面→多角形の閉形式形態係数、パッチ間形態係数 |
+| `src/direct.c` | 光源→パッチ / 任意点の直接放射照度 |
+| `src/radiosity.c` | 波長ビンごとのラジオシティ (Jacobi 反復) |
+| `src/solve.c` | ドライバ、測定面の合成、エネルギー収支 |
+| `src/output.c` | `ppfd.log` と CSV |
+| `data/sample/` | サンプル `.ppfd` と検証スクリプト `ppfd_check.sh` |
+
+## ビルド / テスト
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+
+# 検証 (すべて解析解・SI 定義値との比較)
+sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
+```
+
+依存は無し (OpenMP は任意)。Linux / macOS / Windows (MSVC + Ninja) の
+3 OS を CI で検証する。
+
+## 移植性の絶対規則 (OpenFDTD の Windows CI で実際に踏んだもの)
+
+- **C99 VLA 禁止** (MSVC C2057/C2466)。`malloc` + 明示インデックスの
+  フラット配列を使う。
+- **OpenMP のループ変数は pragma の前に宣言する** (MSVC は OpenMP 2.0)。
+  ループ変数は符号付き `int`。
+- **float\*/double\* の取り違え禁止**: 配列の実型と読み出しポインタ型の
+  不一致は Windows で 0xC0000005 クラッシュ (glibc は偶然耐える)。
+  `plen` のみ float、それ以外の物理量は double。
+- libm リンクは CMake の `MATH_LIB` 変数経由 (Windows には m.lib が無い)。
+- MSVC フラグは CMakeLists の既存ブロックに従う
+  (`/utf-8`, `_USE_MATH_DEFINES`, `_CRT_SECURE_NO_WARNINGS`)。
+- 数学定数は `PI` / `C0` / `H_PLANCK` 等の `ppfd.h` の自前マクロを使う
+  (`M_PI` に依存しない)。
+- `strcasecmp` は MSVC に無い。`streq_ci()` (utils.c) を使う。
+- `-Wall -Wextra -Wshadow -Wconversion -Wpedantic` で警告ゼロを維持する。
+
+## 設計の規則
+
+- グローバル変数は使わない。状態は `ppfd_t` コンテキスト構造体 1 個を
+  main で確保して関数に渡す。
+- **分光量はすべて「ビン積分値」で持つ** (`[W/m²]` であって `[W/m²/nm]`
+  ではない)。光量子換算が重み付き総和になり、帯域の端の扱いが
+  `band_weight()` 1 箇所に集約される。CSV へ出すときだけ `/dlam` する。
+- 入力キー追加は `src/input_data.c` に、既定値は「キー省略時に従来動作と
+  完全一致」になるよう初期化する (後方互換)。未知キーは無視 (前方互換)。
+- 新機能には `data/sample/` の**解析解付き**検証ケースを追加し、
+  `ppfd_check.sh` に判定を足す。解析解が取れない機能は、既存の厳密な
+  性質 (エネルギー収支・単調性・対称性) で縛れないか先に考える。
+- **エネルギー収支を壊さない**。群落が無い閉キャビティでは反射率にも
+  形状にもよらず「壁の吸収 = 光源の放射束」が厳密に成り立つ。
+  `closure error` が 1e-5 より悪化したら形態係数まわりの回帰を疑う。
+- **精度を落とす最適化は必ずログに出す**。`quadrature` の自動選択のように
+  暗黙にサンプル数を減らす箇所は、実際に使った値を `plog` する。
+- OpenMP は任意依存。`#ifdef _OPENMP` でガードする。
+- 外部ライブラリを追加しない。
+
+## 物理・データの規則
+
+- **組み込みの McCree 作用曲線は公表曲線の近似値** (誤差の目安 ±0.03、
+  625nm で 1.0 に正規化)。`spectrum.c` のコメントにその旨を明記してある。
+  ここを「公式データ」と書き換えない。精度が要る用途は入力キー
+  `actionspectrum = file <path>` で上書きする。
+- CIE 1924 V(λ) は標準表 (5nm, 380-780nm)。555nm でちょうど 1.0 という
+  性質が `1 W @555nm → 683 lm` の検証に効いているので崩さない。
+- 光量子換算係数 `PHOTON_K` は h, c, N_A の SI 定義値だけからなる厳密量
+  (λ[nm] × 8.359346e-3 µmol/J)。丸めた定数に置き換えない。
+
+## 検証ケース一覧 (`ppfd_check.sh`)
+
+| ケース | 何を縛っているか |
+|---|---|
+| `unit.ppfd` | 光量子換算と光束の定義 (4.639437 µmol/s, 683 lm)、逆二乗+余弦則、DLI の算術 |
+| `cavity.ppfd` | 閉キャビティのエネルギー収支 (ρ=0.9 と ρ=0)、平均壁面照度 |
+| `canopy.ppfd` | Beer-Lambert 減衰 exp(−G·LAI) を 2 通りの G で |
+| `panel.ppfd` | 面光源分割の収束 (矩形形態係数の閉形式) |
+| `unit625.ppfd` | 作用曲線の正規化点で YPFD = PPFD (曲線の値に依存しない) |
+| `rack.ppfd` | 実用例の単調性 (群落を通ると PPFD と R:FR が下がる) |
+
+## CI
+
+`.github/workflows/ci.yml`: Linux / macOS / Windows (MSVC + Ninja) の 3 ジョブ。
+検証スクリプトは 3 OS とも同一の POSIX sh を実行する (Windows は Git Bash)。
+タグ `v*` push で Release にバイナリ添付。

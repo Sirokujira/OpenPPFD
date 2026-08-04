@@ -1,0 +1,149 @@
+# OpenPPFD CI — 3 OS でビルド + 解析解との検証 (data/sample/ppfd_check.sh)。
+# 依存ライブラリなし (OpenMP は任意) のため vcpkg/HDF5 等の手順は不要。
+# 検証スクリプトは 3 OS とも同一の POSIX sh を使う (Windows は Git Bash)。
+name: CI
+
+on:
+  push:
+    branches: [ main, "claude/**" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write   # タグ push 時の Release 添付に使用
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      # 移植性の回帰よけ : 警告ゼロを維持する
+      - name: Build with strict warnings
+        run: |
+          cmake -B build-warn -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-Wall -Wextra -Wshadow -Wconversion -Wno-sign-conversion -Wpedantic -Werror"
+          cmake --build build-warn -j"$(nproc)"
+
+      - name: Validation tests (analytic solutions)
+        run: sh data/sample/ppfd_check.sh "$GITHUB_WORKSPACE/bin/oppfd" /tmp/ppfd-check
+
+      - name: Upload binaries (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: oppfd-linux-x64
+          path: bin/oppfd
+
+      - name: Package for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: tar czf oppfd-linux-x64.tar.gz -C bin oppfd
+
+      - name: Attach binaries to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: oppfd-linux-x64.tar.gz
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-logs-linux
+          path: /tmp/ppfd-check/*.log
+          if-no-files-found: ignore
+
+  # macOS (Apple Silicon)。AppleClang は OpenMP を同梱しないが、
+  # OpenPPFD は OpenMP 任意なのでシリアルビルドで検証する。
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: Validation tests (analytic solutions)
+        run: sh data/sample/ppfd_check.sh "$GITHUB_WORKSPACE/bin/oppfd" /tmp/ppfd-check
+
+      - name: Upload binaries (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: oppfd-macos-arm64
+          path: bin/oppfd
+
+      - name: Package for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: tar czf oppfd-macos-arm64.tar.gz -C bin oppfd
+
+      - name: Attach binaries to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: oppfd-macos-arm64.tar.gz
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-logs-macos
+          path: /tmp/ppfd-check/*.log
+          if-no-files-found: ignore
+
+  # Windows (MSVC + Ninja)。検証は Git Bash で同一スクリプトを実行する。
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Validation tests (analytic solutions)
+        shell: bash
+        run: sh data/sample/ppfd_check.sh "$GITHUB_WORKSPACE/bin/oppfd.exe" /tmp/ppfd-check
+
+      - name: Upload binaries (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: oppfd-windows-x64
+          path: bin/oppfd.exe
+
+      - name: Package for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: Compress-Archive -Path bin/oppfd.exe -DestinationPath oppfd-windows-x64.zip
+
+      - name: Attach binaries to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: oppfd-windows-x64.zip
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-logs-windows
+          path: /tmp/ppfd-check/*.log
+          if-no-files-found: ignore

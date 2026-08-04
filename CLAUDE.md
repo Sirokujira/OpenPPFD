@@ -1,0 +1,79 @@
+# OpenPPFD
+
+植物工場照明 (PPFD / スペクトル / 輻射伝達) ソルバー (C)。OpenFDTD の
+姉妹プロジェクトで、ビルド規約・移植性規則を共有する。
+直方体チャンバの直接光 + ラジオシティ相互反射 + 群落 Beer-Lambert 減衰
+→ 測定面の PPFD / YPFD / DLI / R:FR / 均斉度。
+
+**波動光学ではない**。FDTD/RCWA の回折・干渉ではなく光線・輻射伝達を
+解く。また**一般照明の測光量 (lm/lx/CRI) では評価できない** — 光合成は
+V(λ) ではなく McCree 作用曲線、lm ではなく µmol/m²/s。この 2 点が
+本プロジェクトの存在理由なので、どちらかを崩す変更をしない。
+
+`AGENTS.md` に同じ規約を単独で読める形でまとめてある。
+**規約を変えたら両方直すこと。**
+
+## ビルド / テスト
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+
+# 検証 : 解析解・SI 定義値との比較 (全 13 判定)
+sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
+```
+
+## 移植性の絶対規則 (OpenFDTD の Windows CI で実際に踏んだもの)
+
+- **C99 VLA 禁止** (MSVC C2057/C2466)。`malloc` + 明示インデックスの
+  フラット配列を使う。
+- **OpenMP のループ変数は pragma の前に宣言する** (MSVC は OpenMP 2.0)。
+  ループ変数は符号付き `int`。
+- **float\*/double\* の取り違え禁止**: 配列の実型と読み出しポインタ型の
+  不一致は Windows で 0xC0000005 クラッシュ (glibc は偶然耐える)。
+  `plen` は float、それ以外の物理量は double。
+- libm リンクは CMake の `MATH_LIB` 変数経由 (Windows には m.lib が無い)。
+- MSVC フラグは CMakeLists の既存ブロックに従う
+  (`/utf-8`, `_USE_MATH_DEFINES`, `_CRT_SECURE_NO_WARNINGS`)。
+- 数学定数は `PI` / `C0` / `H_PLANCK` 等の ppfd.h の自前マクロを使う。
+- `strcasecmp` は MSVC に無い。`streq_ci()` (utils.c) を使う。
+- `-Wall -Wextra -Wshadow -Wconversion -Wpedantic` で警告ゼロを維持する。
+
+## 設計の規則
+
+- グローバル変数は使わない。状態は `ppfd_t` コンテキスト構造体 1 個を
+  main で確保して関数に渡す。
+- **分光量はすべて「ビン積分値」で持つ** (`[W/m²]` であって `[W/m²/nm]`
+  ではない)。こうすると光量子換算が重み付き総和になり、帯域の端の扱いが
+  `band_weight()` 1 箇所に集約される。CSV へ出すときだけ `/dlam` する。
+- 入力キー追加は `src/input_data.c` に、既定値は「キー省略時に従来動作と
+  完全一致」になるよう初期化する (後方互換)。未知キーは無視 (前方互換)。
+- 新機能には data/sample/ の**解析解付き**検証ケースを追加し、
+  `ppfd_check.sh` に判定を足す (CI 3 OS で自動実行される)。解析解が
+  取れない機能は、既存の厳密な性質 (エネルギー収支・単調性・対称性) で
+  縛れないか先に考える。
+- **エネルギー収支を壊さない**。群落が無い閉キャビティでは反射率にも
+  形状にもよらず「壁の吸収 = 光源の放射束」が厳密に成り立つ。
+  `closure error` が 1e-5 より悪化したら形態係数まわりの回帰を疑う。
+- **精度を落とす最適化は必ずログに出す**。`quadrature` の自動選択のように
+  暗黙にサンプル数を減らす箇所は、実際に使った値を `plog` すること
+  (黙って粗くすると「全部計算した」と読めてしまう)。
+- OpenMP は任意依存。`#ifdef _OPENMP` でガードし、スレッド数によらず
+  出力が一致することを確認する。
+- 外部ライブラリ (HDF5/LAPACK/BLAS 等) を追加しない。
+
+## 物理・データの規則
+
+- **組み込みの McCree 作用曲線は公表曲線の近似値**。spectrum.c の
+  コメントにその旨と誤差の目安を明記してある。ここを「公式データ」と
+  書き換えない。精度が要る用途は `actionspectrum = file` で上書きする。
+- CIE 1924 V(λ) は標準表 (5nm, 380-780nm)。555nm でちょうど 1.0 という
+  性質が `683 lm/W` の検証に効いているので崩さない。
+- 光量子換算係数 `PHOTON_K` は h, c, N_A の SI 定義値だけからなる厳密量。
+  丸めた定数 (0.836 等) に置き換えない。
+
+## CI
+
+`.github/workflows/ci.yml`: Linux / macOS / Windows (MSVC + Ninja)。
+検証スクリプトは 3 OS とも同一の POSIX sh を使う (Windows は Git Bash)。
+タグ `v*` push で Release にバイナリ添付。

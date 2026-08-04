@@ -1,0 +1,250 @@
+# OpenPPFD
+
+A radiative-transfer solver for **plant factory lighting** in C: photosynthetic
+photon flux density (PPFD), spectral design, and canopy light distribution.
+Companion project to [OpenFDTD](https://github.com/Sirokujira/OpenFDTD) — same
+build conventions, same portability rules, no external libraries.
+
+植物工場 (人工光型植物工場) の照明設計ソルバー (C 言語)。
+[OpenFDTD](https://github.com/Sirokujira/OpenFDTD) の姉妹プロジェクトで、
+ビルド規約・移植性規則を共有します。外部ライブラリ (HDF5/LAPACK/BLAS)
+には依存しません。
+
+## なぜ FDTD/RCWA と別なのか
+
+植物工場の照明は**波動光学の問題ではありません**。扱うのは
+
+- **光量子束密度 (PPFD)** — µmol/m²/s。エネルギー (W) ではなく光子の数
+- **スペクトル設計** — 赤 660nm / 青 450nm / 遠赤 730nm の配分、R:FR 比
+- **輻射伝達** — 反射壁での相互反射と、群落 (葉群) の Beer-Lambert 減衰
+
+であって、波長スケールの構造による回折・干渉ではありません。したがって
+FDTD (`OpenFDTD`) や RCWA (`OpenRCWA`) ではなく、光線・輻射伝達の枠組みで
+解きます。
+
+さらに、**一般照明の測光量がそのまま使えません**。一般照明は
+lm / lx / lm/W (標準比視感度 V(λ) 基準、緑 555nm がピーク) ですが、
+光合成は 400-700nm の光子を数え (PPFD)、量子収率は McCree 作用曲線
+(赤 600-680nm がピーク) に従います。赤主体の園芸用 LED は
+**lm/W では低く、µmol/J では高い**ので、一般照明の指標で評価すると
+設計を誤ります。OpenPPFD は両方を必ず並べて出力します。
+
+```
+photon efficacy   =      2.69344 umol/J     <- 園芸用の指標
+luminous efficacy =      63.8918 lm/W       <- 一般照明の指標 (同じ器具)
+```
+
+## Theory / 理論概要
+
+1. **直接光** — 光源は配光 `I(θ) = Φ(m+1)/(2π) cos^m θ` (m=1 で Lambert、
+   `iso` で等方) を持つ点光源。面光源は nu × nv 個の点光源へ分割します。
+2. **相互反射** — チャンバ 6 面を矩形パッチに分割し、波長ビンごとに
+   ラジオシティ方程式 `B_i = ρ_i (E_i^dir + Σ_j F_ij τ_ij B_j)` を
+   Jacobi 反復で解きます。形態係数は「微小面 → 平面多角形」の閉形式を
+   受光パッチ上で Gauss 求積したもの (放射側は厳密)。
+3. **群落** — 葉面積密度 a = LAI/厚さ、葉群投影係数 G の一様スラブとして、
+   経路長 s に対し `τ = exp(-G a s sqrt(1-ω_λ))`。ω_λ = 葉の反射率+透過率
+   (Goudriaan の散乱補正) で、ω=0 のとき厳密な Beer-Lambert 則になります。
+   赤・青は強く吸収され、緑と遠赤は群落深部まで届きます。
+4. **測定面** — 水平・上向きの量子センサ相当。各セルで直接光 + 壁からの
+   間接光を合成し、PPFD / YPFD / ePAR / lx / DLI / R:FR を出します。
+
+### v1 の制限
+
+- 幾何は**直方体チャンバ 1 個**のみ (棚板・トレイ・遮蔽物は未対応)。
+  キャビティが凸なのでパッチ間の遮蔽判定を省いています。
+- 反射はすべて **Lambert 拡散**。鏡面反射・BRDF は未対応。
+- 群落は**減衰のみ**で、葉からの散乱光をキャビティへ戻しません
+  (群落が吸収した分はエネルギー収支の残差として報告)。
+- パッチ間の群落透過率はパッチ重心どうしを結ぶ線分で評価する近似です。
+- 配光は `cos^m` の解析形のみ (IES/LDT 実測配光ファイルは未対応)。
+- 組み込みの McCree 作用曲線は公表曲線の**近似値**です
+  (`actionspectrum = file` で上書きしてください。下記参照)。
+
+## Build / ビルド
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+
+# 検証 (すべて解析解・定義値との比較)
+sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
+```
+
+- Linux / macOS / Windows (MSVC + Ninja) の 3 OS を CI で検証しています。
+- OpenMP は任意です (見つかれば形態係数・直接光・測定面を並列化。
+  無くてもビルド・実行可能)。
+
+## Usage / 実行
+
+```bash
+oppfd [-n <threads>] input.ppfd
+```
+
+出力 (カレントディレクトリ):
+
+| ファイル | 内容 |
+|---|---|
+| `ppfd.log` | 実行ログ。器具の総量・エネルギー収支・測定面ごとの表。`=== normal end ===` で正常終了 |
+| `ppfd_summary.csv` | 測定面ごとの 1 行要約 (平均/最小/最大 PPFD、均斉度、DLI、YPFD、lx、R:FR) |
+| `ppfd_map_<target>.csv` | 測定面のセルごとの分布 (GUI での等高線表示用) |
+| `ppfd_spectrum.csv` | 測定面の面平均スペクトル + 作用曲線 + V(λ) |
+
+## Input format / 入力形式
+
+テキスト形式。1 行目は `OpenPPFD 1 0`、最終行は `end`。`#` はコメント行。
+書式は `キー = 値...`。単位は長さ [m]、波長 [nm]、放射束 [W]。
+**未知のキーは無視されます** (前方互換)。**省略時の既定値は、キーを
+書かない場合と挙動が一致する**よう選んであります (後方互換)。
+
+### 解析条件
+
+| キー | 書式 | 既定 |
+|---|---|---|
+| `title` | `title = 任意文字列` | 空 |
+| `wavelength` | `wavelength = λ開始 λ終了 Δλ` | `380 780 5` |
+| `chamber` | `chamber = Lx Ly Lz` | `1 1 1` |
+| `patchdiv` | `patchdiv = nu nv` (1 面あたりの分割数) | `6 6` |
+| `photoperiod` | `photoperiod = 時間/日` (DLI 用) | `16` |
+| `solver` | `solver = 最大反復数 収束判定` | `200 1e-6` |
+| `quadrature` | `quadrature = msub` (パッチ直接光の複合分割数、0=自動) | `0` |
+| `actionspectrum` | `actionspectrum = file <path>` | 組み込み McCree |
+
+### 材料 (Lambert 拡散面 / 葉)
+
+```
+material = <名前> gray  <ρ> [τ]
+material = <名前> table <λ:ρ[:τ]> <λ:ρ[:τ]> ...
+material = <名前> file  <path>            # "λ ρ [τ]" のテキスト
+```
+
+τ (透過率) は群落の葉材料でのみ使い、散乱係数 ω = ρ + τ になります。
+テーブルは線形補間、範囲外は端の値でクランプします。
+
+### スペクトル
+
+```
+spectrum = <名前> mono      <λ>                        # 単色
+spectrum = <名前> gauss     <中心λ> <半値全幅>
+spectrum = <名前> sum       <中心λ> <半値全幅> <重み> ...  # 3 つ組の繰り返し (白色 LED 等)
+spectrum = <名前> blackbody <T[K]>
+spectrum = <名前> table     <λ:値> ...                  # 分光放射束密度 [/nm 相対]
+spectrum = <名前> file      <path>                      # "λ 値" のテキスト (実測 SPD)
+```
+
+内部では波長ビンごとの重み (総和 1) として保持します。ピークの 1e-10 未満の
+裾は切り落として再正規化するので、放射束は厳密に保存されます。
+
+### 光源
+
+```
+led   = <x> <y> <z> <放射束W> <スペクトル名> [オプション]
+array = <x0> <y0> <z> <nx> <ny> <ピッチx> <ピッチy> <1灯あたり放射束W> <スペクトル名> [オプション]
+```
+
+| オプション | 意味 | 既定 |
+|---|---|---|
+| `beam <m>` | 配光 `I ∝ cos^m θ` | `1` (Lambert) |
+| `iso` | 等方 `I = Φ/4π` | — |
+| `dir <dx> <dy> <dz>` | 配光軸 | `0 0 -1` (真下) |
+| `size <w> <h> [nu nv]` | 面光源の寸法と分割数 | 点光源 |
+| `input <W>` | 消費電力 (µmol/J・lm/W の算出に使う) | 未指定 |
+
+### 壁・群落・測定面・帯域
+
+```
+wall   = <面> <材料名>          # 面 = xmin/xmax/ymin/ymax/zmin(floor)/zmax(ceiling)/side/all
+canopy = <ztop> <zbot> <LAI> <G> <葉材料名>
+target = <名前> <z> <nx> <ny> [<x0> <x1> <y0> <y1>]
+band   = <名前> <λ1> <λ2>       # 光量子束の割合を出す帯域 (既定 : UV-A/青/緑/赤/遠赤)
+```
+
+`wall` を書かない面は完全吸収 (ρ=0) です。`target` の範囲を省略すると
+チャンバの床面全体になります。
+
+### 作用曲線の差し替え
+
+組み込みの McCree (1972) 相対量子収率は**公表曲線をディジタイズした
+近似値** (誤差の目安 ±0.03、625nm で 1.0 に正規化) です。厳密な値が
+必要な場合は
+
+```
+actionspectrum = file mccree.txt      # 各行 "λ[nm] 相対量子収率"
+```
+
+で上書きしてください。YPFD の検証は「625nm 単色なら YPFD = PPFD」という
+曲線の値に依存しない構造的性質で行っているので、差し替えても検証は通ります。
+
+## Validation / 検証 (`data/sample/`)
+
+`ppfd_check.sh` が実行する判定。すべて厳密解 (SI 定義または閉形式) が
+期待値で、誤差の出どころは形態係数の求積と面光源の分割だけです。
+
+| ケース | 解析解 | 実測誤差 | 許容 |
+|---|---|---|---|
+| `unit.ppfd` PPF | 1 W @555nm → 555×8.359346e-3 = 4.639437 µmol/s | +0.0001% | 0.01% |
+| `unit.ppfd` 光束 | 1 W @555nm → 683 lm (lm の定義) | 0.0000% | 0.01% |
+| `unit.ppfd` 逆二乗+余弦 | E(r) = (Φ/π)h²/(h²+r²)² を 2 点で | +0.0001% | 0.2% |
+| `unit.ppfd` DLI | PPFD × 時間 × 3600 × 1e-6 | −0.0003% | 0.001% |
+| `cavity.ppfd` 収支 (ρ=0.9) | 壁の吸収 = 光源の放射束 (形状によらず厳密) | −0.0009% | 0.5% |
+| `cavity.ppfd` 収支 (ρ=0) | 同上 (直接光ソルバー単体) | 0.0000% | 0.5% |
+| `cavity.ppfd` 平均壁面照度 | Φ/(A_tot(1−ρ)) = 3.086420 W/m² | −0.001% | 0.5% |
+| `canopy.ppfd` 透過率 | exp(−G·LAI) = exp(−1), exp(−2) | −0.0001% | 1% |
+| `panel.ppfd` 面光源軸上 | E = ΦF/A_s (矩形形態係数の閉形式) | +0.047% | 1% |
+| `unit625.ppfd` YPFD | 正規化点 625nm で YPFD = PPFD | 0.0000% | 0.5% |
+| `rack.ppfd` | 群落を通ると PPFD と R:FR が下がる (単調性) | — | — |
+
+閉キャビティのエネルギー収支は特に効く検証です。反射率にも形状にも
+よらず厳密に成り立つので、形態係数の求積誤差 (現状 1e-5) がそのまま
+`closure error` に出ます。
+
+## Example / 実用例
+
+`data/sample/rack.ppfd` は栽培面 1.2 × 0.6 m のラック 1 段に、
+赤/青/白/遠赤の LED バー 4 本 × 12 灯を配置し、LAI = 3 のレタス相当群落を
+置いたものです。
+
+```
+--- source totals ---
+radiant flux      =       39.504 W
+PPF (400-700nm)   =      192.958 umol/s
+luminous flux     =      4577.21 lm
+input power       =        71.64 W
+photon efficacy   =      2.69344 umol/J
+luminous efficacy =      63.8918 lm/W
+
+--- target "canopytop" (z = 0.25 m) ---
+PPFD [umol/m2/s]             260.4
+DLI [mol/m2/day]            15.001
+uniformity min/avg          0.73445
+R:FR (660/730)               15.311
+
+--- target "canopybase" (z = 0.06 m) ---
+PPFD [umol/m2/s]             32.65
+R:FR (660/730)               5.124
+```
+
+群落を通ると PPFD が 1/8 に落ちる一方、R:FR は 15.3 → 5.1 まで下がります
+(赤は葉に吸収され遠赤は透過するため)。これは徒長・光形態形成に直結する
+量で、一般照明の lx では見えません。
+
+## Sibling projects / 姉妹リポジトリ
+
+| リポジトリ | 手法 | バイナリ |
+|---|---|---|
+| [OpenFDTD](https://github.com/Sirokujira/OpenFDTD) | 3 次元 FDTD | `ofd` |
+| [OpenRCWA](https://github.com/Sirokujira/OpenRCWA) | 周期構造 RCWA | `orcwa` |
+| [OpenBPM](https://github.com/Sirokujira/OpenBPM) | 導波路 BPM | `obpm` |
+| [OpenPEEC](https://github.com/Sirokujira/OpenPEEC) | 準静的 PEEC | `peec` |
+
+## Reference
+
+- K. J. McCree, "The action spectrum, absorptance and quantum yield of
+  photosynthesis in crop plants", *Agricultural Meteorology* **9**, 191 (1971/72)
+- J. Goudriaan, *Crop Micrometeorology: A Simulation Study* (1977) — 散乱葉の
+  消散係数 sqrt(1−ω) 補正
+- CIE 1924 標準比視感度 V(λ)
+
+## License
+
+MIT

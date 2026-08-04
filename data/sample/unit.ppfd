@@ -1,0 +1,32 @@
+# 検証 (a) 単位換算 + 逆二乗則・余弦則
+#
+# 555 nm 単色・放射束 1 W の点光源 (Lambert 配光 m=1) を高さ 0.5 m に置き、
+# 完全吸収 (黒) のチャンバで直接光だけを見る。
+#
+# 期待値 (いずれも定義から厳密)
+#   PPF          = 1 W * 555 * 8.359346e-3 = 4.639437 umol/s
+#   luminous flux= 1 W * 683 lm/W * V(555) = 683 lm            (V(555) = 1)
+#   床面 (z=0) の放射照度   E(r) = (Phi/pi) h^2 / (h^2 + r^2)^2
+#     中心 r=0 : E = 1/(pi * 0.25) = 1.2732395 W/m^2
+#     PPFD     = E * 4.639437 = 5.907061 umol/m^2/s
+#
+# 21 x 21 セルなので中心セル (ix=iy=10) の中心が x=y=0.5 にちょうど乗る。
+
+OpenPPFD 1 0
+title = unit conversion and inverse square law (analytic)
+
+wavelength = 380 780 5
+chamber    = 1.0 1.0 0.5
+patchdiv   = 4 4
+
+material = black gray 0.0
+wall     = all black
+
+spectrum = na555 mono 555
+
+led = 0.5 0.5 0.5 1.0 na555 beam 1 dir 0 0 -1 input 1.0
+
+target      = floor 0.0 21 21
+photoperiod = 16
+
+end

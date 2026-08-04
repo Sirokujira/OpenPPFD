@@ -1,0 +1,54 @@
+# 植物工場ラック 1 段 (実用例)
+#
+# 栽培面 1.2 x 0.6 m、白色反射壁 (rho = 0.9)、LED バー 4 本 x 12 灯を
+# 栽培面の 0.15 m 上に配置。赤 (660nm) 主体に青 (450nm)・白・遠赤を混ぜ、
+# レタス相当の群落 (LAI = 3.0) を置く。
+#
+# 見るところ
+#   - canopytop の PPFD 平均・均斉度 (min/avg) と DLI
+#   - canopybase の PPFD と R:FR — 群落を通ると赤が減り遠赤が残るので
+#     R:FR が大きく下がる (徒長・光形態形成の指標)
+#   - photon efficacy [umol/J] と luminous efficacy [lm/W] の乖離
+#     (赤主体の器具は umol/J は高いが lm/W は低い = 一般照明の指標では
+#      正しく評価できない)
+
+OpenPPFD 1 0
+title = plant factory rack, red/blue/white LED over a lettuce canopy
+
+wavelength = 380 780 5
+
+chamber  = 1.2 0.6 0.45
+patchdiv = 8 8
+
+# 反射材
+material = white gray 0.90
+material = tray  gray 0.40
+
+# レタス葉の分光光学特性 (反射:透過)。赤・青は強く吸収、緑と遠赤は透過。
+material = leaf table 400:0.05:0.02 450:0.05:0.02 500:0.06:0.03 550:0.15:0.10 600:0.08:0.04 660:0.05:0.02 690:0.10:0.08 700:0.22:0.20 720:0.42:0.42 780:0.47:0.47
+
+wall = all  white
+wall = zmin tray
+
+# LED のスペクトル
+spectrum = red660  gauss 660 22
+spectrum = blue450 gauss 450 20
+spectrum = white4000 sum 450 20 1.0 580 110 2.4
+spectrum = fr730   gauss 730 25
+
+# LED バー 4 本 x 12 灯 (同じ格子上に 4 種を重ねて配置)
+array = 0.05 0.075 0.40 12 4 0.1 0.15 0.5000 red660    beam 1 input 0.8060
+array = 0.05 0.075 0.40 12 4 0.1 0.15 0.1250 blue450   beam 1 input 0.2270
+array = 0.05 0.075 0.40 12 4 0.1 0.15 0.1667 white4000 beam 1 input 0.3970
+array = 0.05 0.075 0.40 12 4 0.1 0.15 0.0313 fr730     beam 1 input 0.0625
+
+# 群落 (z = 0.05..0.25 m, LAI 3.0, 球状葉群分布 G = 0.5)
+canopy = 0.25 0.05 3.0 0.5 leaf
+
+target = canopytop  0.25 25 13
+target = canopybase 0.06 25 13
+
+photoperiod = 16
+solver      = 500 1e-8
+
+end
