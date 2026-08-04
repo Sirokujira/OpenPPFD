@@ -483,6 +483,7 @@ int input_data(FILE *fp, ppfd_t *p)
 	p->maxiter = 200;
 	p->converg = 1e-6;
 	p->canopy.k0 = 0.5;
+	p->canopy.nlayer = 8;
 
 	/* ---- 1 回目 : 分光グリッドと作用曲線を確定する ---------------- */
 	while (readline_norm(fp, strline, sizeof(strline))) {
@@ -808,6 +809,19 @@ int input_data(FILE *fp, ppfd_t *p)
 			if (ntok >= 3) p->maxiter = atoi(token[2]);
 			if (ntok >= 4) p->converg = atof(token[3]);
 			if (p->maxiter < 1) p->maxiter = 1;
+		}
+		else if (!strcmp(token[0], "leafscatter")) {
+			/*
+			群落の散乱光をキャビティへ戻すか。既定 off は v1 と完全に同じ挙動。
+			キー名を canopy* にしないのは ppfd_check.sh が群落なしの変種を
+			grep -v '^canopy' で作っているため (巻き添えで消える)。
+			*/
+			p->canopy.scatter = (streq_ci(token[2], "on") || streq_ci(token[2], "twostream")) ? 1 : 0;
+		}
+		else if (!strcmp(token[0], "leaflayers")) {
+			p->canopy.nlayer = atoi(token[2]);
+			if (p->canopy.nlayer < 1) p->canopy.nlayer = 1;
+			if (p->canopy.nlayer > 256) p->canopy.nlayer = 256;
 		}
 		else if (!strcmp(token[0], "quadrature")) {
 			p->msub = atoi(token[2]);

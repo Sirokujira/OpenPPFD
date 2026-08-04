@@ -151,6 +151,33 @@ static int rect_quad(const patch_t *q, int msub, vec3_t *xs, double *ws)
 	return k;
 }
 
+/*
+パッチ q から平面多角形 poly への形態係数 (受光側を複合 Gauss 求積)。
+群落の上下面のような「パッチでない多角形」を相手にするとき用。
+
+gn が零ベクトルでなければ、半空間 gn·(x - gp) > 0 にある求積点だけを
+数える。群落面をまたぐ壁パッチが面の裏側からも寄与を拾わないようにする
+(ff_point_poly は受光側の法線しか見ないので、これは呼び出し側の責任)。
+*/
+double ff_patch_poly(const patch_t *q, const vec3_t *poly, int nv, int msub,
+                     vec3_t gp, vec3_t gn)
+{
+	vec3_t xs[144];
+	double ws[144];
+	const int gate = (v_dot(gn, gn) > 0.0);
+	double f = 0.0;
+	int    nq, g;
+
+	if (msub < 1) msub = 1;
+	if (msub > 4) msub = 4;
+	nq = rect_quad(q, msub, xs, ws);
+	for (g = 0; g < nq; g++) {
+		if (gate && (v_dot(gn, v_sub(xs[g], gp)) <= 0.0)) continue;
+		f += ws[g] * ff_point_poly(xs[g], q->n, poly, nv);
+	}
+	return f;
+}
+
 /* パッチの代表長さ (対角長) */
 static double patch_size(const patch_t *q)
 {

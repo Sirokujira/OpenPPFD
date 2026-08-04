@@ -132,9 +132,17 @@ void output_log(ppfd_t *p)
 	plog(p, "mean wall irrad.  = %12.6g W/m2 (wall area %g m2)\n",
 		(awall > 0.0) ? (ewall / awall) : 0.0, awall);
 	if (p->canopy.on) {
-		plog(p, "absorbed by canopy= %12.6g W\n", p->absorb_canopy);
+		plog(p, "absorbed by canopy= %12.6g W%s\n", p->absorb_canopy,
+			p->canopy.scatter ? "" : " (residual; scattering discarded)");
 		plog(p, "canopy PPF capture= %12.6g umol/s (%.2f %% of PPF)\n",
 			p->canopy_abs, (p->ppf_total > 0.0) ? (100.0 * p->canopy_abs / p->ppf_total) : 0.0);
+		if (p->canopy.scatter) {
+			plog(p, "canopy scattered  = %12.6g W (returned to the cavity)\n", p->cscat_out);
+			/* 群落の吸収を実計算しているので収支は独立に閉じるはず */
+			plog(p, "closure error     = %12.3e (should be 0; = form factor quadrature error)\n",
+				(p->flux_total > 0.0)
+					? (((p->absorb_wall + p->absorb_canopy) - p->flux_total) / p->flux_total) : 0.0);
+		}
 	}
 	else {
 		plog(p, "closure error     = %12.3e (should be 0; = form factor quadrature error)\n",

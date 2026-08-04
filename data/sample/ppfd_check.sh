@@ -261,6 +261,44 @@ chkabs "rack2: tiers independent" "$(maxdiff map_tier2.csv ppfd_map_tier2.csv)" 
 chkabs "rack2: lower tier dark"   "$(awk -F, 'NR == 3 {print $7}' "$WORK/ppfd_summary.csv")" 0
 
 echo
+echo "== (i) canopy two-stream layer kernel (algebraic identities) =="
+# 幾何にも入力にも依存しない代数的性質。macOS (Apple Silicon) だけ FMA の
+# 有無で結果が変わった実例があるので、この種の恒等式は 3 OS で常時縛る。
+if "$OPPFD" --selftest > "$WORK/selftest.log" 2>&1; then
+	awk 'END {printf "%-28s -> OK (%s)\n", "canopy kernel self test", $0}' "$WORK/selftest.log"
+else
+	echo "canopy kernel self test         -> NG" >&2
+	grep -- '-> NG' "$WORK/selftest.log" >&2 || true
+	status=1
+fi
+
+echo
+echo "== (j) canopy scattering returned to the cavity =="
+# (j-1) omega = 0 なら散乱は無いので、leafscatter = on でも出力がビット一致する
+sed 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/canopy.ppfd" > "$WORK/scat0.ppfd"
+run canopy.ppfd
+cp "$WORK/ppfd_map_below.csv" "$WORK/map_noscat.csv"
+run scat0.ppfd
+chkabs "scatter: omega=0 identical" "$(maxdiff map_noscat.csv ppfd_map_below.csv)" 0
+
+# (j-2) 散乱を戻すと群落の吸収は残差ではなく実計算になるので、収支が独立に閉じる
+sed -e 's/^material = blackleaf gray 0.0 0.0/material = blackleaf gray 0.25 0.25/' \
+    -e 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/canopy.ppfd" > "$WORK/scat_w.ppfd"
+run scat_w.ppfd
+chkabs "scatter: closure (omega=0.5)" "$(logval 'closure error')" 1e-5
+# 戻した散乱光は正でなければならない
+awk -v s="$(logval 'canopy scattered')" 'BEGIN {
+	printf "%-28s actual=%.4g -> %s (must be > 0)\n", "scatter: flux returned", s, (s > 0) ? "OK" : "NG";
+	exit (s > 0) ? 0 : 1}' || status=1
+
+# (j-3) omega = 1 (無吸収葉) なら群落は 1 光子も吸収しない (構造的に厳密)
+sed -e 's/^material = blackleaf gray 0.0 0.0/material = blackleaf gray 0.5 0.5/' \
+    -e 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/canopy.ppfd" > "$WORK/scat_w1.ppfd"
+run scat_w1.ppfd
+chkabs "scatter: omega=1 no capture" "$(logval 'absorbed by canopy')" 0
+chk "scatter: omega=1 walls take all" "$(logval 'absorbed by walls')" 1.0 2e-3
+
+echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2
 else

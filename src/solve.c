@@ -24,15 +24,23 @@ static void gather_target(ppfd_t *p)
 	const int n = p->npatch;
 	const int nl = p->nlam;
 	double *kext = (double *)xcalloc((size_t)nl, sizeof(double));
+	vec3_t  ctop[4], cbot[4];
 	int     it, i;
 
+	if (p->canopy.on && p->canopy.scatter) {
+		const double zt = p->canopy.ztop, zb = p->canopy.zbot;
+		ctop[0] = v_make(0.0, 0.0, zt);   ctop[1] = v_make(p->Lx, 0.0, zt);
+		ctop[2] = v_make(p->Lx, p->Ly, zt); ctop[3] = v_make(0.0, p->Ly, zt);
+		cbot[0] = v_make(0.0, 0.0, zb);   cbot[1] = v_make(p->Lx, 0.0, zb);
+		cbot[2] = v_make(p->Lx, p->Ly, zb); cbot[3] = v_make(0.0, p->Ly, zb);
+	}
+	else {
+		memset(ctop, 0, sizeof(ctop));
+		memset(cbot, 0, sizeof(cbot));
+	}
+
 	if (p->canopy.on) {
-		for (i = 0; i < nl; i++) {
-			double omega = p->mat[p->canopy.imat].rho[i] + p->mat[p->canopy.imat].tau[i];
-			if (omega < 0.0) omega = 0.0;
-			if (omega > 0.999) omega = 0.999;
-			kext[i] = p->canopy.k0 * sqrt(1.0 - omega) * p->canopy.a;
-		}
+		for (i = 0; i < nl; i++) kext[i] = canopy_kext(p, i);
 	}
 
 	for (it = 0; it < p->ntarget; it++) {
@@ -54,6 +62,21 @@ static void gather_target(ppfd_t *p)
 			int ip, il;
 
 			direct_point(p, x, nz, E);
+
+			if (p->canopy.on && p->canopy.scatter) {
+				/* 群落が返す拡散光 : 外なら上下面から、内部なら層の下向き流束 */
+				if (x.z >= p->canopy.ztop) {
+					const double f = ff_point_poly(x, nz, ctop, 4);
+					for (il = 0; il < nl; il++) E[il] += f * p->cbtop[il];
+				}
+				else if (x.z <= p->canopy.zbot) {
+					const double f = ff_point_poly(x, nz, cbot, 4);
+					for (il = 0; il < nl; il++) E[il] += f * p->cbbot[il];
+				}
+				else {
+					for (il = 0; il < nl; il++) E[il] += canopy_interior(p, il, x.z);
+				}
+			}
 
 			for (ip = 0; ip < n; ip++) {
 				const patch_t *q = &p->patch[ip];
@@ -115,8 +138,20 @@ static void energy_balance(ppfd_t *p)
 		p->ppf_wall += p->patch[ip].area * calc_ppfd(p, E);
 	}
 
-	p->absorb_canopy = p->flux_total - p->absorb_wall;
-	p->canopy_abs = p->ppf_total - p->ppf_wall;
+	if (p->canopy.on && p->canopy.scatter) {
+		/* 残差ではなく実計算 : 群落が吸収した分を層ごとに足し上げてある */
+		double a = 0.0;
+		for (il = 0; il < nl; il++) {
+			E[il] = p->cabs[il];
+			a += p->cabs[il];
+		}
+		p->absorb_canopy = a;
+		p->canopy_abs = calc_ppfd(p, E);
+	}
+	else {
+		p->absorb_canopy = p->flux_total - p->absorb_wall;
+		p->canopy_abs = p->ppf_total - p->ppf_wall;
+	}
 
 	free(E);
 }
@@ -135,6 +170,12 @@ void solve(ppfd_t *p)
 	setup_ff(p);
 	plog(p, "form factor : row sum error = %.3e, reciprocity error = %.3e  (%.2f s)\n",
 		p->ff_rowsum_err, p->ff_recip_err, cputime() - t0);
+	if (p->canopy.on && p->canopy.scatter) {
+		canopy_setup(p);
+		plog(p, "canopy scatter : %d layers, plane closure up/down = %.4f / %.4f, "
+			"buried patches = %d of %d\n",
+			p->canopy.nlayer, p->cnorm_up, p->cnorm_dn, p->cnburied, p->npatch);
+	}
 	if (p->nocc > 0) {
 		/* 遮蔽が部分的な対だけは標本化 (= 厳密でない) なので数を出す */
 		plog(p, "occluders   : %d, partially shadowed patch pairs = %d, enclosed patches = %d\n",

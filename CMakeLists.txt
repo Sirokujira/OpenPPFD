@@ -29,6 +29,7 @@ add_executable(oppfd
     src/input_data.c
     src/spectrum.c
     src/photometry.c
+    src/canopy.c
     src/geometry.c
     src/formfactor.c
     src/direct.c

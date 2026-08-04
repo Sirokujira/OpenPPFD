@@ -35,11 +35,12 @@ exp(-G a s sqrt(1-ω_λ)) を掛ける (geometry.c)。
 点 x (単位法線 n) における全光源からの直接分光放射照度 [W/m²] を
 E[0..nlam-1] に加算する (E は呼び出し側でゼロ初期化しておく)。
 */
-void direct_point(const ppfd_t *p, vec3_t x, vec3_t n, double *E)
+void direct_point_ex(const ppfd_t *p, vec3_t x, vec3_t n, double *E, double *dep, double *seg)
 {
 	int    ie, i;
 	double *acc = NULL;
 	double  tr[512];
+	const int nl = p->canopy.nlayer;
 	const int use_acc = (!p->canopy.on) && (p->nspec <= 4096);
 
 	if (use_acc) {
@@ -95,6 +96,11 @@ void direct_point(const ppfd_t *p, vec3_t x, vec3_t n, double *E)
 
 				es = inten * cr / d2;
 
+				if (dep != NULL) {
+					/* この光線が層へ預ける分 (幾何係数は波長によらない) */
+					canopy_deposit(p, sp, x, es, &dep[(size_t)e->ispec * nl], seg);
+				}
+
 				if (use_acc) {
 					acc[e->ispec] += es;
 				}
@@ -120,6 +126,11 @@ void direct_point(const ppfd_t *p, vec3_t x, vec3_t n, double *E)
 		}
 		free(acc);
 	}
+}
+
+void direct_point(const ppfd_t *p, vec3_t x, vec3_t n, double *E)
+{
+	direct_point_ex(p, x, n, E, NULL, NULL);
 }
 
 /*
@@ -179,6 +190,9 @@ static int patch_on_shadow_edge(const ppfd_t *p, const patch_t *q)
 void direct_patch(ppfd_t *p)
 {
 	const int n = p->npatch;
+	const int nl = p->canopy.nlayer;
+	const int ns = p->nspec;
+	double *cd = NULL;
 	int ip;
 	int msub = p->msub;
 	int nedge = 0;
@@ -189,6 +203,10 @@ void direct_patch(ppfd_t *p)
 	plog(p, "direct quadrature : msub = %d (%d points/patch)\n", msub, 9 * msub * msub);
 
 	p->Ed = (double *)xcalloc((size_t)n * p->nlam, sizeof(double));
+	if (p->canopy.scatter) {
+		/* パッチごとに分けて溜め、あとで固定順に足す (スレッド数不変のため) */
+		cd = (double *)xcalloc((size_t)n * ns * nl, sizeof(double));
+	}
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic) reduction(+:nedge)
@@ -202,9 +220,18 @@ void direct_patch(ppfd_t *p)
 		const int edge = patch_on_shadow_edge(p, q);
 		const int msub_i = edge ? ((msub * 8 < 32) ? (msub * 8) : 32) : msub;
 		const double h = 1.0 / msub_i;
+		double *dp = (cd != NULL) ? &cd[(size_t)ip * ns * nl] : NULL;
+		double *dtmp = (cd != NULL) ? (double *)xcalloc((size_t)ns * nl, sizeof(double)) : NULL;
+		double *seg = (cd != NULL) ? (double *)xmalloc((size_t)nl * sizeof(double)) : NULL;
 		int su, sv, gu, gv, i;
 
 		nedge += edge;
+		/*
+		群落散乱が有効なら、このパッチへ向かう光束が層へ預ける分を集める。
+		パッチ i に届くはずの放射束は A_i * (減衰前の面積平均放射照度) なので、
+		面積平均の求積重みをそのまま使い、最後に A_i を掛ければよい。
+		Σ_m 預け入れ + 透過 = 1 が望遠鏡和で厳密に成り立つ。
+		*/
 		for (sv = 0; sv < msub_i; sv++) {
 			for (su = 0; su < msub_i; su++) {
 				for (gv = 0; gv < 3; gv++) {
@@ -221,13 +248,43 @@ void direct_patch(ppfd_t *p)
 						const vec3_t x = v_add(q->p[0], v_add(v_scale(eu, u), v_scale(ev, v)));
 
 						for (i = 0; i < p->nlam; i++) tmp[i] = 0.0;
-						direct_point(p, x, q->n, tmp);
+						if (dtmp != NULL) {
+							for (i = 0; i < ns * nl; i++) dtmp[i] = 0.0;
+						}
+						direct_point_ex(p, x, q->n, tmp, dtmp, seg);
 						for (i = 0; i < p->nlam; i++) E[i] += w * tmp[i];
+						if (dtmp != NULL) {
+							for (i = 0; i < ns * nl; i++) dp[i] += w * dtmp[i];
+						}
 					}
 				}
 			}
 		}
+		if (dp != NULL) {
+			/* 面積平均 -> 放射束 [W] */
+			for (i = 0; i < ns * nl; i++) dp[i] *= q->area;
+			free(dtmp);
+			free(seg);
+		}
 		free(tmp);
+	}
+
+	if (cd != NULL) {
+		/* 波長へ展開する (加算順序はパッチ -> スペクトル -> 層で固定) */
+		int is, m, il;
+		for (ip = 0; ip < n; ip++) {
+			for (is = 0; is < ns; is++) {
+				const spec_t *sc = &p->spec[is];
+				for (m = 0; m < nl; m++) {
+					const double d = cd[(((size_t)ip * ns) + is) * nl + m];
+					if (d == 0.0) continue;
+					for (il = sc->i0; il <= sc->i1; il++) {
+						p->cdep[((size_t)m * p->nlam) + il] += d * sc->w[il];
+					}
+				}
+			}
+		}
+		free(cd);
 	}
 
 	if (nedge > 0) {

@@ -126,7 +126,7 @@ typedef struct {
 	int     ndivu, ndivv;           /* 1 面あたりの分割数 (0 = patchdiv に従う) */
 } occluder_t;
 
-/* ---- 群落 (Beer-Lambert 減衰スラブ) -------------------------------- */
+/* ---- 群落 (Beer-Lambert 減衰スラブ + 衝突源二流散乱) ---------------- */
 typedef struct {
 	int     on;
 	double  ztop, zbot;             /* ztop > zbot */
@@ -134,6 +134,9 @@ typedef struct {
 	double  k0;                     /* 葉群投影係数 G (球状分布 0.5 / 水平葉 1.0) */
 	int     imat;                   /* 葉材料 (ω = rho + tau) */
 	double  a;                      /* 葉面積密度 = lai / (ztop - zbot) [1/m] */
+	/* 散乱光の還流 (leafscatter キー。既定 off = v1 と完全に同じ挙動) */
+	int     scatter;                /* 1 = 散乱をキャビティへ戻す */
+	int     nlayer;                 /* 二流の層数 (leaflayers、既定 8) */
 } canopy_t;
 
 /* ---- 解析コンテキスト --------------------------------------------- */
@@ -177,6 +180,19 @@ typedef struct {
 	double   *Ed;                   /* [npatch*nlam] 直接放射照度 [W/m²] */
 	double   *B;                    /* [npatch*nlam] 放射発散度 [W/m²] */
 	double   *Einc;                 /* [npatch*nlam] 入射放射照度 (直接+間接) */
+
+	/* 群落散乱 (canopy.scatter のときだけ確保。単位系はコメント参照) */
+	double   *cdep;                 /* [nlayer*nlam] 光源ビームが層へ預けた放射束 [W] */
+	double   *cdepw;                /* [npatch*nlayer] 放射発散度 1 単位あたりの預け入れ [m²] */
+	double   *cffup;                /* [npatch] パッチ i が見る群落上面の形態係数 */
+	double   *cffdn;                /* [npatch] 同 下面 */
+	double   *cfdn, *cfup;          /* [(nlayer+1)*nlam] 層界面の下向き/上向き拡散流束 */
+	double   *cbtop, *cbbot;        /* [nlam] 上面/下面から出る拡散流束 [W/m²] */
+	double   *cabs;                 /* [nlam] 拡散場が群落内で吸収した放射束 [W] */
+	double    carea;                /* 群落の水平断面積 [m²] */
+	double    cnorm_up, cnorm_dn;   /* 正規化前の Σ A_i F_i / A_c (1 が理想) */
+	int       cnburied;             /* 群落の高さ範囲に埋没したパッチ数 */
+	double    cscat_out;            /* 群落が返した放射束 [W] (診断) */
 
 	/* 診断 */
 	double    ff_rowsum_err;        /* 行和 Σ_j F_ij の 1 からの最大偏差 */
@@ -238,6 +254,19 @@ int     input_data(FILE *, ppfd_t *);
 int     find_mat(const ppfd_t *, const char *);
 int     find_spec(const ppfd_t *, const char *);
 
+/* canopy.c */
+void    canopy_kernel(double, double, double *, double *, double *, double *);
+int     canopy_selftest(void);
+double  canopy_omega(const ppfd_t *, int);
+double  canopy_kext(const ppfd_t *, int);
+double  canopy_segments(const ppfd_t *, vec3_t, vec3_t, double *);
+void    canopy_setup(ppfd_t *);
+void    canopy_field(ppfd_t *, int, const double *, double *, double *);
+double  canopy_interior(const ppfd_t *, int, double);
+double  canopy_deposit(const ppfd_t *, vec3_t, vec3_t, double, double *, double *);
+void    canopy_column(const ppfd_t *, double, const double *,
+                      double *, double *, double *, double *, double *);
+
 /* geometry.c */
 void    setup_patch(ppfd_t *);
 void    setup_target(ppfd_t *);
@@ -247,6 +276,7 @@ int     occ_blocked(const ppfd_t *, vec3_t, vec3_t);
 
 /* formfactor.c */
 double  ff_point_poly(vec3_t, vec3_t, const vec3_t *, int);
+double  ff_patch_poly(const patch_t *, const vec3_t *, int, int, vec3_t, vec3_t);
 double  vis_point_patch(const ppfd_t *, vec3_t, const patch_t *, int *);
 double  vis_patch_patch(const ppfd_t *, const patch_t *, const patch_t *, int *);
 void    setup_ff(ppfd_t *);
@@ -254,6 +284,7 @@ void    setup_ff(ppfd_t *);
 /* direct.c */
 void    direct_patch(ppfd_t *);
 void    direct_point(const ppfd_t *, vec3_t, vec3_t, double *);
+void    direct_point_ex(const ppfd_t *, vec3_t, vec3_t, double *, double *, double *);
 
 /* radiosity.c */
 void    solve_radiosity(ppfd_t *);
