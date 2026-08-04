@@ -80,9 +80,28 @@ double ff_point_poly(vec3_t p, vec3_t n, const vec3_t *poly, int nv)
 	vec3_t buf[12];
 	int    m, i;
 	double sum = 0.0;
+	double dmax = 0.0, rmax = 0.0;
 
 	m = clip_halfspace(poly, nv, p, n, buf, 12);
 	if (m < 3) return 0.0;
+
+	/*
+	クリップ後の多角形が受光点の接平面上に退化していないか。
+	多角形が平面 n·(x-p) = 0 に完全に乗っているとき立体角は 0 だが、
+	クリップは平面上の頂点 (d = 0) を残すので、線分に潰れた多角形が
+	そのまま下の総和に流れ込む。頂点がほぼ同一直線上に並ぶと
+	外積の丸め誤差がそのまま角度になるので、値は 0 ではなく数値ごみに
+	なる (FMA を使うと顕在化し、棚板に接する壁パッチとの間に 1e-9
+	程度の形態係数が生えて、仕切ったはずの部屋に光が漏れた)。
+	*/
+	for (i = 0; i < m; i++) {
+		const vec3_t r = v_sub(buf[i], p);
+		const double d = v_dot(n, r);
+		const double a = v_norm(r);
+		if (d > dmax) dmax = d;
+		if (a > rmax) rmax = a;
+	}
+	if (dmax <= (1e-12 * rmax)) return 0.0;
 
 	for (i = 0; i < m; i++) {
 		const vec3_t r0 = v_sub(buf[i], p);

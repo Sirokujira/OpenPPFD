@@ -39,6 +39,11 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
 - 数学定数は `PI` / `C0` / `H_PLANCK` 等の ppfd.h の自前マクロを使う。
 - `strcasecmp` は MSVC に無い。`streq_ci()` (utils.c) を使う。
 - `-Wall -Wextra -Wshadow -Wconversion -Wpedantic` で警告ゼロを維持する。
+- **「厳密に 0 になるはず」の量を丸めに委ねない**。退化した配置 (受光点の
+  接平面に乗った多角形など) を積和の打ち消しで 0 にすると、FMA の有無で
+  結果が変わる (Apple Silicon の macOS だけ CI が落ちた実例あり)。退化は
+  打ち消しではなく明示的な判定で落とす (`ff_point_poly` の冒頭)。再現は
+  `-march=native -ffp-contract=fast` を付けてビルドする。
 
 ## 設計の規則
 

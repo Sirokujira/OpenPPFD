@@ -71,6 +71,11 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
   (`M_PI` に依存しない)。
 - `strcasecmp` は MSVC に無い。`streq_ci()` (utils.c) を使う。
 - `-Wall -Wextra -Wshadow -Wconversion -Wpedantic` で警告ゼロを維持する。
+- **「厳密に 0 になるはず」の量を丸めに委ねない**。退化した配置 (受光点の
+  接平面に乗った多角形など) は積和の打ち消しに頼ると FMA の有無で結果が
+  変わる。Apple Silicon の macOS だけ落ちた実例があるので、退化は
+  打ち消しではなく明示的な判定で落とす (`ff_point_poly` の冒頭)。
+  ローカルで再現するには `-march=native -ffp-contract=fast` を付けてビルドする。
 
 ## 設計の規則
 
