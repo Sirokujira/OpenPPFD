@@ -483,6 +483,7 @@ int input_data(FILE *fp, ppfd_t *p)
 	p->maxiter = 200;
 	p->converg = 1e-6;
 	p->canopy.k0 = 0.5;
+	p->canopy.nlayer = 8;
 
 	/* ---- 1 回目 : 分光グリッドと作用曲線を確定する ---------------- */
 	while (readline_norm(fp, strline, sizeof(strline))) {

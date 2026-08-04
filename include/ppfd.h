@@ -126,7 +126,7 @@ typedef struct {
 	int     ndivu, ndivv;           /* 1 面あたりの分割数 (0 = patchdiv に従う) */
 } occluder_t;
 
-/* ---- 群落 (Beer-Lambert 減衰スラブ) -------------------------------- */
+/* ---- 群落 (Beer-Lambert 減衰スラブ + 衝突源二流散乱) ---------------- */
 typedef struct {
 	int     on;
 	double  ztop, zbot;             /* ztop > zbot */
@@ -134,6 +134,9 @@ typedef struct {
 	double  k0;                     /* 葉群投影係数 G (球状分布 0.5 / 水平葉 1.0) */
 	int     imat;                   /* 葉材料 (ω = rho + tau) */
 	double  a;                      /* 葉面積密度 = lai / (ztop - zbot) [1/m] */
+	/* 散乱光の還流 (leafscatter キー。既定 off = v1 と完全に同じ挙動) */
+	int     scatter;                /* 1 = 散乱をキャビティへ戻す */
+	int     nlayer;                 /* 二流の層数 (leaflayers、既定 8) */
 } canopy_t;
 
 /* ---- 解析コンテキスト --------------------------------------------- */
@@ -237,6 +240,16 @@ double  photdist_value(const photdist_t *, double, double);
 int     input_data(FILE *, ppfd_t *);
 int     find_mat(const ppfd_t *, const char *);
 int     find_spec(const ppfd_t *, const char *);
+
+/* canopy.c */
+void    canopy_kernel(double, double, double *, double *, double *, double *);
+int     canopy_selftest(void);
+double  canopy_omega(const ppfd_t *, int);
+double  canopy_kext(const ppfd_t *, int);
+double  canopy_segments(const ppfd_t *, vec3_t, vec3_t, double *);
+double  canopy_deposit(const ppfd_t *, vec3_t, vec3_t, double, double *, double *);
+void    canopy_column(const ppfd_t *, double, const double *,
+                      double *, double *, double *, double *, double *);
 
 /* geometry.c */
 void    setup_patch(ppfd_t *);

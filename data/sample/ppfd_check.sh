@@ -261,6 +261,18 @@ chkabs "rack2: tiers independent" "$(maxdiff map_tier2.csv ppfd_map_tier2.csv)" 
 chkabs "rack2: lower tier dark"   "$(awk -F, 'NR == 3 {print $7}' "$WORK/ppfd_summary.csv")" 0
 
 echo
+echo "== (i) canopy two-stream layer kernel (algebraic identities) =="
+# 幾何にも入力にも依存しない代数的性質。macOS (Apple Silicon) だけ FMA の
+# 有無で結果が変わった実例があるので、この種の恒等式は 3 OS で常時縛る。
+if "$OPPFD" --selftest > "$WORK/selftest.log" 2>&1; then
+	awk 'END {printf "%-28s -> OK (%s)\n", "canopy kernel self test", $0}' "$WORK/selftest.log"
+else
+	echo "canopy kernel self test         -> NG" >&2
+	grep -- '-> NG' "$WORK/selftest.log" >&2 || true
+	status=1
+fi
+
+echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2
 else

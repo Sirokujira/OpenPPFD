@@ -19,6 +19,7 @@ static void usage(void)
 {
 	fprintf(stderr, "Usage: oppfd [-n <threads>] <input.ppfd>\n");
 	fprintf(stderr, "  -n <threads>  number of OpenMP threads (default: system)\n");
+	fprintf(stderr, "  --selftest    run internal algebraic identity checks and exit\n");
 }
 
 int main(int argc, char **argv)
@@ -36,6 +37,10 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
 			usage();
 			return 0;
+		}
+		else if (!strcmp(argv[i], "--selftest")) {
+			/* 幾何にも入力にも依存しない代数的性質の検査 (3 OS の CI で回す) */
+			return canopy_selftest() ? 1 : 0;
 		}
 		else if (argv[i][0] == '-') {
 			fprintf(stderr, "*** unknown option : %s\n", argv[i]);
