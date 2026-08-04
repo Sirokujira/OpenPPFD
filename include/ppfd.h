@@ -64,15 +64,31 @@ typedef struct {
 	int     i0, i1;                 /* w != 0 のビン範囲 (両端含む)。内側ループの短縮用 */
 } spec_t;
 
+/* ---- 実測配光 (IESNA LM-63 / EULUMDAT) ----------------------------- */
+typedef struct {
+	char    path[256];              /* ファイルパス (重複読み込みの判定にも使う) */
+	int     isldt;                  /* 0 = IES, 1 = EULUMDAT */
+	int     ptype;                  /* IES の光度分布型 (1 = type C) */
+	int     ng, nc;                 /* 鉛直角 γ の数 / 水平角 C の数 (1 = 回転対称) */
+	double *gam;                    /* [ng] γ [deg] 昇順、0 = 配光軸方向 */
+	double *cpl;                    /* [nc] C [deg] 昇順 0..360 (対称性を展開済み) */
+	double *I;                      /* [nc*ng] 相対光度 [1/sr]、∫I dΩ = 1 に正規化 */
+	double  lm;                     /* ファイル記載の光度から求めた光束 [lm] (参考値) */
+	double  watt;                   /* ファイル記載の消費電力 [W] (参考値) */
+} photdist_t;
+
 /* ---- 光源 --------------------------------------------------------- */
 typedef struct {
 	vec3_t  pos;                    /* 中心位置 [m] */
 	vec3_t  dir;                    /* 配光軸 (単位ベクトル) */
 	vec3_t  ax, ay;                 /* 面光源のローカル軸 (単位ベクトル) */
+	vec3_t  cx, cy;                 /* 配光ファイルの C 面基準 (C=0 が cx、C=90 が cy) */
 	double  flux;                   /* 放射束 [W] */
 	double  watt;                   /* 消費電力 [W] (0 = 未指定) */
 	int     ispec;                  /* スペクトル番号 */
 	double  mexp;                   /* 配光 I(θ) ∝ cos^m θ (m<0 = 等方) */
+	int     idist;                  /* 実測配光番号 (-1 = cos^m の解析形) */
+	double  crot;                   /* 配光軸まわりの回転 [deg] */
 	double  wsize, hsize;           /* 面光源の寸法 [m] (0 = 点光源) */
 	int     nu, nv;                 /* 面光源の分割数 */
 } emitter_t;
@@ -102,6 +118,14 @@ typedef struct {
 	double  lam1, lam2;
 } band_t;
 
+/* ---- 遮蔽物 (棚板・トレイ・バッフル : 軸並行直方体) ----------------- */
+typedef struct {
+	char    name[NAMELEN];
+	double  x0, x1, y0, y1, z0, z1; /* 昇順に正規化済み。1 辺が 0 なら両面板 */
+	int     imat;                   /* 表面材料 */
+	int     ndivu, ndivv;           /* 1 面あたりの分割数 (0 = patchdiv に従う) */
+} occluder_t;
+
 /* ---- 群落 (Beer-Lambert 減衰スラブ) -------------------------------- */
 typedef struct {
 	int     on;
@@ -127,12 +151,14 @@ typedef struct {
 	int       ndivu, ndivv;         /* 1 面あたりの分割数 */
 
 	/* 入力テーブル */
-	int       nmat, nspec, nemit, ntarget, nband;
+	int       nmat, nspec, nemit, ntarget, nband, ndist, nocc;
 	pmat_t   *mat;
 	spec_t   *spec;
 	emitter_t *emit;
 	target_t *target;
 	band_t   *band;
+	photdist_t *dist;
+	occluder_t *occ;
 	canopy_t  canopy;
 
 	/* 解析条件 */
@@ -155,6 +181,8 @@ typedef struct {
 	/* 診断 */
 	double    ff_rowsum_err;        /* 行和 Σ_j F_ij の 1 からの最大偏差 */
 	double    ff_recip_err;         /* 相反則 A_i F_ij = A_j F_ji の最大相対誤差 */
+	int       ff_nblind;            /* 完全に囲まれて何も見えないパッチ数 (行和 = 0) */
+	int       ff_npartial;          /* 遮蔽が部分的で標本化に頼ったパッチ対の数 */
 	int       niter;
 	double    resid;
 	double    flux_total;           /* 全光源の放射束 [W] */
@@ -201,6 +229,10 @@ double  calc_lux(const ppfd_t *, const double *);
 double  calc_bandppf(const ppfd_t *, const double *, double, double);
 double  calc_irradiance(const ppfd_t *, const double *);
 
+/* photometry.c */
+int     photdist_load(ppfd_t *, const char *, int);
+double  photdist_value(const photdist_t *, double, double);
+
 /* input_data.c */
 int     input_data(FILE *, ppfd_t *);
 int     find_mat(const ppfd_t *, const char *);
@@ -211,9 +243,12 @@ void    setup_patch(ppfd_t *);
 void    setup_target(ppfd_t *);
 double  canopy_path(const ppfd_t *, vec3_t, vec3_t);
 void    canopy_trans(const ppfd_t *, double, double *);
+int     occ_blocked(const ppfd_t *, vec3_t, vec3_t);
 
 /* formfactor.c */
 double  ff_point_poly(vec3_t, vec3_t, const vec3_t *, int);
+double  vis_point_patch(const ppfd_t *, vec3_t, const patch_t *, int *);
+double  vis_patch_patch(const ppfd_t *, const patch_t *, const patch_t *, int *);
 void    setup_ff(ppfd_t *);
 
 /* direct.c */

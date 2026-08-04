@@ -2,7 +2,8 @@
 
 植物工場照明 (PPFD / スペクトル / 輻射伝達) ソルバー (C)。OpenFDTD の
 姉妹プロジェクトで、ビルド規約・移植性規則を共有する。
-直方体チャンバの直接光 + ラジオシティ相互反射 + 群落 Beer-Lambert 減衰
+直方体チャンバの直接光 (解析配光 / IES・EULUMDAT 実測配光) + 遮蔽物
+(棚板) の影 + ラジオシティ相互反射 + 群落 Beer-Lambert 減衰
 → 測定面の PPFD / YPFD / DLI / R:FR / 均斉度。
 
 **波動光学ではない**。FDTD/RCWA の回折・干渉ではなく光線・輻射伝達を
@@ -19,7 +20,7 @@ V(λ) ではなく McCree 作用曲線、lm ではなく µmol/m²/s。この 2 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 
-# 検証 : 解析解・SI 定義値との比較 (全 13 判定)
+# 検証 : 解析解・SI 定義値との比較 (全 37 判定)
 sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
 ```
 
@@ -38,6 +39,11 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
 - 数学定数は `PI` / `C0` / `H_PLANCK` 等の ppfd.h の自前マクロを使う。
 - `strcasecmp` は MSVC に無い。`streq_ci()` (utils.c) を使う。
 - `-Wall -Wextra -Wshadow -Wconversion -Wpedantic` で警告ゼロを維持する。
+- **「厳密に 0 になるはず」の量を丸めに委ねない**。退化した配置 (受光点の
+  接平面に乗った多角形など) を積和の打ち消しで 0 にすると、FMA の有無で
+  結果が変わる (Apple Silicon の macOS だけ CI が落ちた実例あり)。退化は
+  打ち消しではなく明示的な判定で落とす (`ff_point_poly` の冒頭)。再現は
+  `-march=native -ffp-contract=fast` を付けてビルドする。
 
 ## 設計の規則
 
@@ -54,7 +60,13 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
   縛れないか先に考える。
 - **エネルギー収支を壊さない**。群落が無い閉キャビティでは反射率にも
   形状にもよらず「壁の吸収 = 光源の放射束」が厳密に成り立つ。
-  `closure error` が 1e-5 より悪化したら形態係数まわりの回帰を疑う。
+  `closure error` が 1e-5 より悪化したら形態係数まわりの回帰を疑う
+  (遮蔽物があるケースは別。影の境界でパッチ求積の被積分関数が不連続に
+  なるので 1e-4 台が下限で、これは形態係数の問題ではない)。
+- **形態係数は「受光側の法線」しか見ない**。放射側のパッチが裏を向いて
+  いないかは `ff_point_poly` の呼び出し側で判定する。凸キャビティだけなら
+  常に成り立つが、遮蔽物は同じ多角形を表裏 2 枚のパッチで共有するので、
+  これを落とすと二重計上で行和が 1 を超えラジオシティが発散する。
 - **精度を落とす最適化は必ずログに出す**。`quadrature` の自動選択のように
   暗黙にサンプル数を減らす箇所は、実際に使った値を `plog` すること
   (黙って粗くすると「全部計算した」と読めてしまう)。
@@ -71,6 +83,11 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
   性質が `683 lm/W` の検証に効いているので崩さない。
 - 光量子換算係数 `PHOTON_K` は h, c, N_A の SI 定義値だけからなる厳密量。
   丸めた定数 (0.836 等) に置き換えない。
+- **実測配光ファイル (IES/LDT) からは配光の形だけを取る**。記載の cd/lm
+  は V(λ) 基準の測光量なので、SPD 抜きに放射束 [W] や PPF へは換算
+  できない。放射束は入力ファイル側 (W 欄 / `ppf` / `lumens`) が決める。
+  配光は `∫Î dΩ = 1` へ**厳密に**正規化する (台形則で済ませるとその
+  O(Δγ²) 誤差がそのまま放射束の誤差になり `closure error` を汚す)。
 
 ## CI
 

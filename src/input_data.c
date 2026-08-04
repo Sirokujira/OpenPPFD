@@ -26,6 +26,12 @@ input_data.c
 		} \
 	} while (0)
 
+/* 昇順に並べ替える (遮蔽物の範囲指定はどちら向きでもよい) */
+#define SORT2(a, b) \
+	do { \
+		if ((a) > (b)) { const double t_ = (a); (a) = (b); (b) = t_; } \
+	} while (0)
+
 int find_mat(const ppfd_t *p, const char *name)
 {
 	int i;
@@ -344,17 +350,58 @@ static void spec_trim(spec_t *s, int nlam)
 	while ((s->i1 > s->i0) && (s->w[s->i1] == 0.0)) s->i1--;
 }
 
-/* dir から正規直交系 (ax, ay) を作る (面光源のローカル軸) */
+/*
+dir から正規直交系を 2 組作る。
+
+  ax, ay : 面光源のローカル軸 (向きは任意でよい)
+  cx, cy : 実測配光の C 面基準。dir = (0,0,-1) のとき cx = +x, cy = +y に
+           なるよう +x を dir に直交化して作る (C=0 が +x、C=90 が +y)。
+*/
 static void make_frame(emitter_t *e)
 {
 	vec3_t up = v_make(0, 0, 1);
+	vec3_t t;
+	double s;
+
 	if (fabs(v_dot(e->dir, up)) > 0.9) up = v_make(1, 0, 0);
 	e->ax = v_unit(v_cross(up, e->dir));
 	e->ay = v_unit(v_cross(e->dir, e->ax));
+
+	t = v_make(1, 0, 0);
+	if (fabs(v_dot(e->dir, t)) > 0.9) t = v_make(0, 1, 0);
+	s = v_dot(t, e->dir);
+	e->cx = v_unit(v_sub(t, v_scale(e->dir, s)));
+	e->cy = v_unit(v_cross(e->cx, e->dir));
+}
+
+/* スペクトル既知の光源で PPF [µmol/s] から放射束 [W] へ */
+static double flux_from_ppf(const ppfd_t *p, int is, double ppf)
+{
+	double k = 0.0;
+	int    i;
+
+	for (i = 0; i < p->nlam; i++) {
+		const double w = band_weight(p, i, 400.0, 700.0);
+		if (w > 0.0) k += p->spec[is].w[i] * PHOTON_K(p->lam[i]) * w;
+	}
+	return (k > EPS) ? (ppf / k) : 0.0;
+}
+
+/* スペクトル既知の光源で 光束 [lm] から放射束 [W] へ */
+static double flux_from_lm(const ppfd_t *p, int is, double lm)
+{
+	double k = 0.0;
+	int    i;
+
+	for (i = 0; i < p->nlam; i++) {
+		k += p->spec[is].w[i] * p->vlambda[i];
+	}
+	k *= K_MAX;
+	return (k > EPS) ? (lm / k) : 0.0;
 }
 
 /* led / array 共通のオプション引数を読む。戻り値 0 = 成功 */
-static int emitter_options(emitter_t *e, char **tok, int ntok, int k)
+static int emitter_options(ppfd_t *p, emitter_t *e, char **tok, int ntok, int k)
 {
 	while (k < ntok) {
 		if (streq_ci(tok[k], "beam") && (k + 1 < ntok)) {
@@ -383,6 +430,27 @@ static int emitter_options(emitter_t *e, char **tok, int ntok, int k)
 			e->watt = atof(tok[k + 1]);
 			k += 2;
 		}
+		else if ((streq_ci(tok[k], "ies") || streq_ci(tok[k], "ldt")) && (k + 1 < ntok)) {
+			e->idist = photdist_load(p, tok[k + 1], streq_ci(tok[k], "ldt"));
+			if (e->idist < 0) {
+				fprintf(stderr, "*** cannot read photometric file : %s\n", tok[k + 1]);
+				return 1;
+			}
+			k += 2;
+		}
+		else if (streq_ci(tok[k], "rot") && (k + 1 < ntok)) {
+			e->crot = atof(tok[k + 1]);
+			k += 2;
+		}
+		else if (streq_ci(tok[k], "ppf") && (k + 1 < ntok)) {
+			/* 放射束をカタログの PPF [µmol/s] で与える (W 欄は無視される) */
+			e->flux = flux_from_ppf(p, e->ispec, atof(tok[k + 1]));
+			k += 2;
+		}
+		else if (streq_ci(tok[k], "lumens") && (k + 1 < ntok)) {
+			e->flux = flux_from_lm(p, e->ispec, atof(tok[k + 1]));
+			k += 2;
+		}
 		else {
 			return 1;   /* 未知のオプション */
 		}
@@ -399,7 +467,7 @@ int input_data(FILE *fp, ppfd_t *p)
 	char   strline[BUFSIZ], strsave[BUFSIZ];
 	char  *token[MAXTOKEN];
 	const char sep[] = " \t";
-	int    cmat = 0, cspec = 0, cemit = 0, ctarget = 0, cband = 0;
+	int    cmat = 0, cspec = 0, cemit = 0, ctarget = 0, cband = 0, cocc = 0;
 	int    i;
 	double *ax_lam = NULL, *ax_v = NULL, *ax_v2 = NULL;
 	int    nax = 0;
@@ -584,8 +652,9 @@ int input_data(FILE *fp, ppfd_t *p)
 			}
 			e.dir = v_make(0, 0, -1);
 			e.mexp = 1.0;
+			e.idist = -1;
 			e.nu = e.nv = 4;
-			if (emitter_options(&e, token, ntok, 7)) {
+			if (emitter_options(p, &e, token, ntok, 7)) {
 				fprintf(stderr, "*** invalid led option : %s\n", strsave);
 				ierr = 1;
 				continue;
@@ -617,8 +686,9 @@ int input_data(FILE *fp, ppfd_t *p)
 			if ((nxa < 1) || (nya < 1)) { fprintf(stderr, "*** invalid array data\n"); ierr = 1; continue; }
 			e0.dir = v_make(0, 0, -1);
 			e0.mexp = 1.0;
+			e0.idist = -1;
 			e0.nu = e0.nv = 4;
-			if (emitter_options(&e0, token, ntok, 11)) {
+			if (emitter_options(p, &e0, token, ntok, 11)) {
 				fprintf(stderr, "*** invalid array option : %s\n", strsave);
 				ierr = 1;
 				continue;
@@ -655,6 +725,48 @@ int input_data(FILE *fp, ppfd_t *p)
 			}
 			APPEND(p->target, p->ntarget, ctarget, target_t);
 			p->target[p->ntarget++] = t;
+		}
+		else if (!strcmp(token[0], "occluder")) {
+			/* occluder = name x0 x1 y0 y1 z0 z1 material [div nu nv] */
+			occluder_t o;
+			int im;
+			if (ntok < 10) { fprintf(stderr, "*** invalid occluder data\n"); ierr = 1; continue; }
+			memset(&o, 0, sizeof(o));
+			strncpy(o.name, token[2], NAMELEN - 1);
+			o.x0 = atof(token[3]);  o.x1 = atof(token[4]);
+			o.y0 = atof(token[5]);  o.y1 = atof(token[6]);
+			o.z0 = atof(token[7]);  o.z1 = atof(token[8]);
+			SORT2(o.x0, o.x1);
+			SORT2(o.y0, o.y1);
+			SORT2(o.z0, o.z1);
+			im = find_mat(p, token[9]);
+			if (im < 0) {
+				fprintf(stderr, "*** unknown material : %s\n", token[9]);
+				ierr = 1;
+				continue;
+			}
+			o.imat = im;
+			if ((ntok >= 13) && streq_ci(token[10], "div")) {
+				o.ndivu = atoi(token[11]);
+				o.ndivv = atoi(token[12]);
+			}
+			if (((o.x1 - o.x0) <= 0.0) && ((o.y1 - o.y0) <= 0.0)) {
+				fprintf(stderr, "*** invalid occluder data (degenerate in 2 axes)\n");
+				ierr = 1;
+				continue;
+			}
+			if (((o.x1 - o.x0) <= 0.0) && ((o.z1 - o.z0) <= 0.0)) {
+				fprintf(stderr, "*** invalid occluder data (degenerate in 2 axes)\n");
+				ierr = 1;
+				continue;
+			}
+			if (((o.y1 - o.y0) <= 0.0) && ((o.z1 - o.z0) <= 0.0)) {
+				fprintf(stderr, "*** invalid occluder data (degenerate in 2 axes)\n");
+				ierr = 1;
+				continue;
+			}
+			APPEND(p->occ, p->nocc, cocc, occluder_t);
+			p->occ[p->nocc++] = o;
 		}
 		else if (!strcmp(token[0], "canopy")) {
 			int im;

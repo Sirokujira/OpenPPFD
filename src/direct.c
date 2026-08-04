@@ -10,6 +10,10 @@ m = 1 が Lambert 配光 I = (Φ/π) cosθ、m = 0 が半球一様、m < 0 は�
     I = Φ/(4π)
 を表す。∫I dΩ = Φ は m によらず満たされる。
 
+実測配光ファイル (IES LM-63 / EULUMDAT) を与えた場合は
+    I(γ, C) = Φ Î(γ, C)          ∫ Î dΩ = 1
+の Î を photometry.c から引く。こちらも放射束は厳密に保存される。
+
 ■ 面光源
 寸法 w × h の平面 Lambert 光源は nu × nv 個の点光源に分割し、各々に
 Φ/(nu·nv) を与える。分割数 → ∞ で軸上放射照度は解析解
@@ -19,6 +23,10 @@ m = 1 が Lambert 配光 I = (Φ/π) cosθ、m = 0 が半球一様、m < 0 は�
 ■ 群落
 光源から受光点までの線分が群落スラブを横切る長さ s を求め、分光透過率
 exp(-G a s sqrt(1-ω_λ)) を掛ける (geometry.c)。
+
+■ 遮蔽物
+光源と受光点を結ぶ線分が遮蔽物 (棚板等) に当たればその寄与を落とす。
+直接光の遮蔽は 2 値なので近似は入らない。
 */
 
 #include "ppfd.h"
@@ -63,8 +71,20 @@ void direct_point(const ppfd_t *p, vec3_t x, vec3_t n, double *E)
 
 				cr = -v_dot(n, r) / d;          /* 受光面が光源を向く向き */
 				if (cr <= 0.0) continue;
+				if (occ_blocked(p, sp, x)) continue;   /* 棚板等の影 */
 
-				if (e->mexp < 0.0) {
+				if (e->idist >= 0) {
+					/* 実測配光 : Î は ∫Î dΩ = 1 に正規化済みなので I = Φ Î */
+					const vec3_t u = v_scale(r, 1.0 / d);
+					double cg = v_dot(u, e->dir);
+					double ca;
+					if (cg > 1.0) cg = 1.0;
+					if (cg < -1.0) cg = -1.0;
+					ca = atan2(v_dot(u, e->cy), v_dot(u, e->cx)) * (180.0 / PI) - e->crot;
+					inten = fsub * photdist_value(&p->dist[e->idist], acos(cg) * (180.0 / PI), ca);
+					if (inten <= 0.0) continue;
+				}
+				else if (e->mexp < 0.0) {
 					inten = fsub / (4.0 * PI);
 				}
 				else {
@@ -112,12 +132,56 @@ nemit * npatch * (3*msub)^2 * (有効ビン数) に比例するので、光源�
 
 光源が少ないほど被積分関数が急峻なので、この既定は精度を落とさない
 方向に働く : 検証ケース (光源 1 個) は常に msub = 3 になる。
+
+遮蔽物があると影の境界で被積分関数が不連続になり、複合 Gauss の収束が
+O(1/msub) まで落ちる (エネルギー収支の closure error に効く)。境界が
+またぐパッチだけ msub を 8 倍 (上限 32) に上げ、細分したパッチ数を
+ログに出す。それでも収支は 1e-4 程度が限界で、これは形態係数ではなく
+直接光のパッチ求積の限界。
 */
+
+/*
+影の境界がまたぐパッチか (光源からパッチの 5 点への遮蔽判定が割れるか)。
+面光源は中心で代表させる (細分の要否の判定に使うだけなので粗くてよい)。
+
+判定点は角そのものではなく少し内側に取る。棚板の面にちょうど接する壁
+パッチは、角が遮蔽物の平面上に乗るせいで「角だけ遮られない」と出るが、
+内部は一様に影なので細分しても無駄になる (2 段ラックでは側壁の 64 枚が
+これに当たり、直接光の計算時間が数倍になっていた)。
+*/
+static int patch_on_shadow_edge(const ppfd_t *p, const patch_t *q)
+{
+	const double t = 0.05;          /* 内側への寄せ量 (パッチ辺の割合) */
+	const vec3_t eu = v_sub(q->p[1], q->p[0]);
+	const vec3_t ev = v_sub(q->p[3], q->p[0]);
+	vec3_t xs[5];
+	int    ie, k;
+
+	if (p->nocc == 0) return 0;
+
+	for (k = 0; k < 4; k++) {
+		const double u = ((k == 0) || (k == 3)) ? t : (1.0 - t);
+		const double v = (k < 2) ? t : (1.0 - t);
+		xs[k] = v_add(q->p[0], v_add(v_scale(eu, u), v_scale(ev, v)));
+	}
+	xs[4] = q->c;
+
+	for (ie = 0; ie < p->nemit; ie++) {
+		int nb = 0;
+		for (k = 0; k < 5; k++) {
+			nb += occ_blocked(p, p->emit[ie].pos, xs[k]);
+		}
+		if ((nb > 0) && (nb < 5)) return 1;
+	}
+	return 0;
+}
+
 void direct_patch(ppfd_t *p)
 {
 	const int n = p->npatch;
 	int ip;
 	int msub = p->msub;
+	int nedge = 0;
 
 	if (msub <= 0) {
 		msub = (p->nemit <= 8) ? 3 : ((p->nemit <= 64) ? 2 : 1);
@@ -127,7 +191,7 @@ void direct_patch(ppfd_t *p)
 	p->Ed = (double *)xcalloc((size_t)n * p->nlam, sizeof(double));
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(dynamic) reduction(+:nedge)
 #endif
 	for (ip = 0; ip < n; ip++) {
 		const patch_t *q = &p->patch[ip];
@@ -135,11 +199,14 @@ void direct_patch(ppfd_t *p)
 		const vec3_t ev = v_sub(q->p[3], q->p[0]);
 		double *E = &p->Ed[(size_t)ip * p->nlam];
 		double *tmp = (double *)xcalloc((size_t)p->nlam, sizeof(double));
-		const double h = 1.0 / msub;
+		const int edge = patch_on_shadow_edge(p, q);
+		const int msub_i = edge ? ((msub * 8 < 32) ? (msub * 8) : 32) : msub;
+		const double h = 1.0 / msub_i;
 		int su, sv, gu, gv, i;
 
-		for (sv = 0; sv < msub; sv++) {
-			for (su = 0; su < msub; su++) {
+		nedge += edge;
+		for (sv = 0; sv < msub_i; sv++) {
+			for (su = 0; su < msub_i; su++) {
 				for (gv = 0; gv < 3; gv++) {
 					for (gu = 0; gu < 3; gu++) {
 						static const double gx[3] = {
@@ -161,5 +228,10 @@ void direct_patch(ppfd_t *p)
 			}
 		}
 		free(tmp);
+	}
+
+	if (nedge > 0) {
+		plog(p, "  shadow edges : %d patches refined to msub = %d\n",
+			nedge, (msub * 8 < 32) ? (msub * 8) : 32);
 	}
 }

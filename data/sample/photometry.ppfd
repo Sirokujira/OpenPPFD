@@ -1,0 +1,44 @@
+# 検証 (g) 実測配光ファイル (IESNA LM-63 / EULUMDAT)
+#
+# 配光ファイルからは「配光の形」だけを取り、放射束は入力ファイルの W 欄
+# (または ppf / lumens オプション) で与える。したがって放射束は厳密に
+# 保存され、光度分布によらず PPF は 1 W * 4.639437 = 4.639437 umol/s。
+#
+# 幾何は unit.ppfd と同じ (黒チャンバ 1.0 x 1.0 x 0.5、光源は高さ 0.5 m の
+# 中心、555 nm 単色 1 W、床 21 x 21 セル、中心セルの中心が x=y=0.5)。
+#
+# 期待値 (いずれも厳密)
+#   iso.ies    : I = Phi/(4 pi) の等方配光。床中心 E = Phi/(4 pi h^2)
+#                = 1/(4 pi 0.25) = 0.3183099 W/m^2 -> 1.476765 umol/m^2/s
+#                (= "iso" オプションと一致する)
+#   lambert.ies: I = (Phi/pi) cos(gamma)。床中心 E = Phi/(pi h^2)
+#                = 1.2732395 W/m^2 -> 5.907115 umol/m^2/s
+#                (= "beam 1" と一致する。1 deg 刻みの表を線形補間するので
+#                 cos との差は ~4e-5)
+#   iso.ldt    : iso.ies と同じ配光を EULUMDAT (Isym=1) で書いたもの
+#   asym.ies / asym.ldt : I = (Phi/pi) cos(gamma) (1 + 0.6 cos 2C) の
+#                非対称配光を IES (C 面 0-90 の 4 分の 1 対称) と
+#                EULUMDAT (Isym=4) で書いたもの。両者は一致する。
+#                さらに rot 90 は床面分布の x と y を入れ替える。
+#
+# 器具はそれぞれ別の target で見るため、光源は 1 つずつ別ケースにする
+# (ppfd_check.sh が本ファイルを sed で書き換えて 1 器具ずつ実行する)。
+
+OpenPPFD 1 0
+title = photometric distribution files (IES / EULUMDAT)
+
+wavelength = 380 780 5
+chamber    = 1.0 1.0 0.5
+patchdiv   = 4 4
+
+material = black gray 0.0
+wall     = all black
+
+spectrum = na555 mono 555
+
+led = 0.5 0.5 0.5 1.0 na555 ies iso.ies
+
+target      = floor 0.0 21 21
+photoperiod = 16
+
+end

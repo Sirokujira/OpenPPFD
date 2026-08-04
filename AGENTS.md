@@ -11,7 +11,8 @@
 姉妹プロジェクトで、ビルド規約・移植性規則を共有する。外部ライブラリ
 (HDF5/LAPACK/BLAS) に依存しない。
 
-処理内容: 直方体チャンバの直接光 → 壁面ラジオシティ相互反射 →
+処理内容: 直方体チャンバの直接光 (解析配光 / IES・EULUMDAT 実測配光) →
+遮蔽物 (棚板等) の影 → 壁・遮蔽物のラジオシティ相互反射 →
 群落 (葉群) の Beer-Lambert 減衰 → 測定面ごとの
 PPFD / YPFD / ePAR / DLI / 照度 / R:FR / 均斉度。
 
@@ -32,8 +33,9 @@ PPFD / YPFD / ePAR / DLI / 照度 / R:FR / 均斉度。
 | `include/ppfd.h` | 定数・構造体 (`ppfd_t`)・全プロトタイプ |
 | `src/input_data.c` | `.ppfd` テキストのパース (2 パス: 分光グリッド確定 → 本体) |
 | `src/spectrum.c` | 分光グリッド、McCree / V(λ)、PPFD・YPFD・lx への換算 |
-| `src/geometry.c` | 壁パッチ分割、測定面、群落スラブの経路長・透過率 |
-| `src/formfactor.c` | 微小面→多角形の閉形式形態係数、パッチ間形態係数 |
+| `src/photometry.c` | 実測配光ファイル (IES LM-63 / EULUMDAT) の読み込みと補間 |
+| `src/geometry.c` | 壁・遮蔽物のパッチ分割、測定面、群落スラブ、遮蔽判定 |
+| `src/formfactor.c` | 微小面→多角形の閉形式形態係数、パッチ間形態係数、可視率 |
 | `src/direct.c` | 光源→パッチ / 任意点の直接放射照度 |
 | `src/radiosity.c` | 波長ビンごとのラジオシティ (Jacobi 反復) |
 | `src/solve.c` | ドライバ、測定面の合成、エネルギー収支 |
@@ -69,6 +71,11 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
   (`M_PI` に依存しない)。
 - `strcasecmp` は MSVC に無い。`streq_ci()` (utils.c) を使う。
 - `-Wall -Wextra -Wshadow -Wconversion -Wpedantic` で警告ゼロを維持する。
+- **「厳密に 0 になるはず」の量を丸めに委ねない**。退化した配置 (受光点の
+  接平面に乗った多角形など) は積和の打ち消しに頼ると FMA の有無で結果が
+  変わる。Apple Silicon の macOS だけ落ちた実例があるので、退化は
+  打ち消しではなく明示的な判定で落とす (`ff_point_poly` の冒頭)。
+  ローカルで再現するには `-march=native -ffp-contract=fast` を付けてビルドする。
 
 ## 設計の規則
 
@@ -84,7 +91,14 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
   性質 (エネルギー収支・単調性・対称性) で縛れないか先に考える。
 - **エネルギー収支を壊さない**。群落が無い閉キャビティでは反射率にも
   形状にもよらず「壁の吸収 = 光源の放射束」が厳密に成り立つ。
-  `closure error` が 1e-5 より悪化したら形態係数まわりの回帰を疑う。
+  `closure error` が 1e-5 より悪化したら形態係数まわりの回帰を疑う
+  (遮蔽物があるケースは別。影の境界でパッチ求積の被積分関数が不連続に
+  なるので 1e-4 台が下限で、これは形態係数の問題ではない)。
+- **形態係数は「受光側の法線」しか見ない**。放射側のパッチが裏を向いて
+  いないかは呼び出し側で判定する (`ff_point_poly` の外)。凸キャビティ
+  だけなら常に成り立つが、遮蔽物は同じ多角形を表裏 2 枚のパッチで
+  共有するので、これを落とすと形態係数が二重計上になり行和が 1 を超え、
+  ラジオシティが発散する。
 - **精度を落とす最適化は必ずログに出す**。`quadrature` の自動選択のように
   暗黙にサンプル数を減らす箇所は、実際に使った値を `plog` する。
 - OpenMP は任意依存。`#ifdef _OPENMP` でガードする。
@@ -100,6 +114,11 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
   性質が `1 W @555nm → 683 lm` の検証に効いているので崩さない。
 - 光量子換算係数 `PHOTON_K` は h, c, N_A の SI 定義値だけからなる厳密量
   (λ[nm] × 8.359346e-3 µmol/J)。丸めた定数に置き換えない。
+- **実測配光ファイル (IES/LDT) からは配光の形だけを取る**。記載の cd/lm
+  は測光量なので、SPD 抜きに放射束 [W] や PPF へは換算できない。
+  放射束は入力ファイル側 (W 欄 / `ppf` / `lumens`) が決める。配光は
+  `∫Î dΩ = 1` へ**厳密に**正規化する (台形則で近似するとその誤差が
+  そのまま放射束の誤差になり `closure error` を汚す)。
 
 ## 検証ケース一覧 (`ppfd_check.sh`)
 
@@ -110,6 +129,10 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
 | `canopy.ppfd` | Beer-Lambert 減衰 exp(−G·LAI) を 2 通りの G で |
 | `panel.ppfd` | 面光源分割の収束 (矩形形態係数の閉形式) |
 | `unit625.ppfd` | 作用曲線の正規化点で YPFD = PPFD (曲線の値に依存しない) |
+| `photometry.ppfd` | 実測配光ファイル : 放射束の保存、等方/Lambert 配光の解析解との一致、C 面の向き、IES と EULUMDAT の一致、`rot` の作用、カタログ値 (`ppf`/`lumens`) からの換算 |
+| `shelf.ppfd` | 遮蔽物込みのエネルギー収支と平均照度、仕切られた室が厳密に真っ暗になること、断面いっぱいの棚板なら可視率が厳密 (標本化に落ちる対が 0) |
+| `shadow.ppfd` | 本影が厳密に 0、影の外が逆二乗則どおり、影があっても収支が閉じること |
+| `rack2.ppfd` | 2 段ラック : 棚板で仕切った段どうしが厳密に独立 (下段の LED を消しても上段の分布が 1 ビットも変わらない) |
 | `rack.ppfd` | 実用例の単調性 (群落を通ると PPFD と R:FR が下がる) |
 
 ## CI

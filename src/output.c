@@ -75,10 +75,26 @@ void output_log(ppfd_t *p)
 		p->lam0, p->lam0 + ((nl - 1) * p->dlam), p->dlam, nl);
 	plog(p, "sources      : %d\n", p->nemit);
 	plog(p, "photoperiod  : %g h/day\n", p->photoperiod);
+	for (ie = 0; ie < p->nocc; ie++) {
+		const occluder_t *o = &p->occ[ie];
+		plog(p, "occluder     : %-10s x %g..%g, y %g..%g, z %g..%g m, %s\n",
+			o->name, o->x0, o->x1, o->y0, o->y1, o->z0, o->z1, p->mat[o->imat].name);
+	}
 	if (p->canopy.on) {
 		plog(p, "canopy       : z = %g..%g m, LAI = %g, G = %g, leaf = %s\n",
 			p->canopy.zbot, p->canopy.ztop, p->canopy.lai, p->canopy.k0,
 			p->mat[p->canopy.imat].name);
+	}
+	for (ie = 0; ie < p->ndist; ie++) {
+		const photdist_t *d = &p->dist[ie];
+		plog(p, "photometry   : %s (%s, %d x %d angles",
+			d->path, d->isldt ? "EULUMDAT" : "IES LM-63", d->nc, d->ng);
+		if (d->lm > 0.0) plog(p, ", rated %.4g lm", d->lm);
+		if (d->watt > 0.0) plog(p, ", %.4g W", d->watt);
+		plog(p, ") -- shape only, flux taken from the input file\n");
+		if (!d->isldt && (d->ptype != 1)) {
+			plog(p, "  * warning : photometric type %d is not type C; treated as type C\n", d->ptype);
+		}
 	}
 
 	/* 光源側の総量 */
@@ -111,7 +127,8 @@ void output_log(ppfd_t *p)
 	}
 	plog(p, "\n--- energy balance ---\n");
 	plog(p, "emitted           = %12.6g W\n", p->flux_total);
-	plog(p, "absorbed by walls = %12.6g W\n", p->absorb_wall);
+	plog(p, "absorbed by walls = %12.6g W%s\n", p->absorb_wall,
+		(p->nocc > 0) ? " (incl. occluders)" : "");
 	plog(p, "mean wall irrad.  = %12.6g W/m2 (wall area %g m2)\n",
 		(awall > 0.0) ? (ewall / awall) : 0.0, awall);
 	if (p->canopy.on) {
