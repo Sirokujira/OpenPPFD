@@ -32,6 +32,133 @@ exp(-G a s sqrt(1-ω_λ)) を掛ける (geometry.c)。
 #include "ppfd.h"
 
 /*
+■ 鏡面反射 (鏡像法)
+チャンバは軸並行の直方体なので、鏡面反射する壁は「光源の鏡像」と等価に
+なる。壁 f の鏡面反射率を rho_s とすると、f に対する鏡像光源は放射束
+rho_s * Phi を持ち、その直線が折り返し経路をそのまま表す。直接光に
+ついてはこれで厳密 (近似は段数の打ち切りだけ)。
+
+鏡像は幅優先で作る。直前に折り返した面へは戻らない (直方体では同じ面で
+2 回続けて折り返すと元に戻るため)。段数は specbounce で決め、打ち切りで
+捨てた放射束をログに出す。
+
+壁の吸収は (1 - rho_diffuse - rho_specular) * Einc になる。鏡面成分は
+鏡像が運ぶので、収支はこれで閉じる。
+
+【制限】鏡像からの直線は折り返した経路を表すので、群落や遮蔽物があると
+経路長も遮蔽判定も合わない。両立は入力段で明示的に弾く。
+*/
+
+/* 面 f (0:xmin 1:xmax 2:ymin 3:ymax 4:zmin 5:zmax) の平面座標と軸 */
+static void face_plane(const ppfd_t *p, int f, int *axis, double *val)
+{
+	*axis = f / 2;
+	switch (f) {
+	case 0: *val = 0.0;    break;
+	case 1: *val = p->Lx;  break;
+	case 2: *val = 0.0;    break;
+	case 3: *val = p->Ly;  break;
+	case 4: *val = 0.0;    break;
+	default: *val = p->Lz; break;
+	}
+}
+
+/* 軸 axis の座標 val の平面で点を鏡映する */
+static vec3_t mirror_point(vec3_t a, int axis, double val)
+{
+	if (axis == 0) a.x = (2.0 * val) - a.x;
+	else if (axis == 1) a.y = (2.0 * val) - a.y;
+	else a.z = (2.0 * val) - a.z;
+	return a;
+}
+
+/* 方向ベクトルの鏡映 (平面の位置によらず軸成分の符号反転) */
+static vec3_t mirror_dir(vec3_t a, int axis)
+{
+	if (axis == 0) a.x = -a.x;
+	else if (axis == 1) a.y = -a.y;
+	else a.z = -a.z;
+	return a;
+}
+
+/*
+鏡像光源を p->emit の末尾に追加する。p->nemit は実光源のみを数えたまま
+にはできないので、実光源数を nreal に控えて全体を nemit とする。
+*/
+void setup_images(ppfd_t *p)
+{
+	const int nreal = p->nemit;
+	int    lev, f, i;
+	int    cap = p->nemit;
+	int    beg = 0, end = nreal;
+	int   *lastface = NULL;
+	double rs[6];
+	int    nspecular = 0;
+
+	p->nimage = 0;
+	p->spec_lost = 0.0;
+	for (f = 0; f < 6; f++) {
+		rs[f] = p->mat[p->wallmat[f]].rhos;
+		if (rs[f] > 0.0) nspecular++;
+	}
+	if ((nspecular == 0) || (p->specbounce <= 0)) return;
+
+	lastface = (int *)xmalloc((size_t)(nreal + 1) * sizeof(int));
+	for (i = 0; i < nreal; i++) lastface[i] = -1;
+
+	for (lev = 0; lev < p->specbounce; lev++) {
+		const int b = beg, e = end;
+		for (i = b; i < e; i++) {
+			for (f = 0; f < 6; f++) {
+				emitter_t im;
+				int    axis;
+				double val;
+				if (rs[f] <= 0.0) continue;
+				if (lastface[i] == f) continue;   /* 同じ面で 2 回続けては折り返さない */
+				face_plane(p, f, &axis, &val);
+				im = p->emit[i];
+				im.flux = p->emit[i].flux * rs[f];
+				im.watt = 0.0;                    /* 消費電力は実光源のみ */
+				if (im.flux <= 0.0) continue;
+				im.pos = mirror_point(im.pos, axis, val);
+				im.dir = mirror_dir(im.dir, axis);
+				im.ax  = mirror_dir(im.ax, axis);
+				im.ay  = mirror_dir(im.ay, axis);
+				im.cx  = mirror_dir(im.cx, axis);
+				im.cy  = mirror_dir(im.cy, axis);
+				if (p->nemit >= cap) {
+					cap = cap ? (2 * cap) : 16;
+					p->emit = (emitter_t *)realloc(p->emit, (size_t)cap * sizeof(emitter_t));
+					lastface = (int *)realloc(lastface, (size_t)cap * sizeof(int));
+					if ((p->emit == NULL) || (lastface == NULL)) {
+						fprintf(stderr, "*** out of memory\n");
+						exit(1);
+					}
+				}
+				if (lev == p->specbounce - 1) {
+					/*
+					次の段は作らないので、この鏡像が生むはずだった分を数える。
+					自分が折り返した面 f へは戻らないので、それ以外の鏡面だけ。
+					鏡面が 1 面しかなければ 0 になる (打ち切り誤差なし)。
+					*/
+					int g;
+					for (g = 0; g < 6; g++) {
+						if ((g != f) && (rs[g] > 0.0)) p->spec_lost += im.flux * rs[g];
+					}
+				}
+				lastface[p->nemit] = f;
+				p->emit[p->nemit++] = im;
+				p->nimage++;
+			}
+		}
+		beg = e;
+		end = p->nemit;
+		if (beg >= end) break;
+	}
+	free(lastface);
+}
+
+/*
 点 x (単位法線 n) における全光源からの直接分光放射照度 [W/m²] を
 E[0..nlam-1] に加算する (E は呼び出し側でゼロ初期化しておく)。
 */

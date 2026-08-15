@@ -161,6 +161,22 @@ static int build_material(ppfd_t *p, pmat_t *m, char **tok, int ntok, int k)
 
 	m->rho = (double *)xcalloc((size_t)p->nlam, sizeof(double));
 	m->tau = (double *)xcalloc((size_t)p->nlam, sizeof(double));
+	m->rhos = 0.0;
+
+	/*
+	鏡面反射率は末尾の "specular <v>" で与える (モードによらず共通)。
+	波長非依存のスカラ : 反射フィルムや研磨アルミはほぼ中性なので、
+	分光にせず 1 個の値で持つ (README に明記)。
+	*/
+	for (i = k; i + 1 < ntok; i++) {
+		if (streq_ci(tok[i], "specular") || streq_ci(tok[i], "mirror")) {
+			m->rhos = atof(tok[i + 1]);
+			if (m->rhos < 0.0) m->rhos = 0.0;
+			if (m->rhos > 1.0) m->rhos = 1.0;
+			ntok = i;               /* 以降はモード引数から外す */
+			break;
+		}
+	}
 
 	if (k >= ntok) return 1;
 
@@ -484,6 +500,7 @@ int input_data(FILE *fp, ppfd_t *p)
 	p->converg = 1e-6;
 	p->canopy.k0 = 0.5;
 	p->canopy.nlayer = 8;
+	p->specbounce = 2;
 
 	/* ---- 1 回目 : 分光グリッドと作用曲線を確定する ---------------- */
 	while (readline_norm(fp, strline, sizeof(strline))) {
@@ -823,6 +840,11 @@ int input_data(FILE *fp, ppfd_t *p)
 			if (p->canopy.nlayer < 1) p->canopy.nlayer = 1;
 			if (p->canopy.nlayer > 256) p->canopy.nlayer = 256;
 		}
+		else if (!strcmp(token[0], "specbounce")) {
+			p->specbounce = atoi(token[2]);
+			if (p->specbounce < 0) p->specbounce = 0;
+			if (p->specbounce > 6) p->specbounce = 6;
+		}
 		else if (!strcmp(token[0], "quadrature")) {
 			p->msub = atoi(token[2]);
 			if (p->msub < 0) p->msub = 0;
@@ -854,6 +876,23 @@ int input_data(FILE *fp, ppfd_t *p)
 	if (p->ntarget == 0) {
 		fprintf(stderr, "*** no target plane (target)\n");
 		return 1;
+	}
+
+	/*
+	鏡像法は「折り返した経路を直線で表す」ので、群落や遮蔽物があると
+	経路長も遮蔽判定も合わない。黙って誤差を出すより弾く。
+	*/
+	{
+		int f, spec = 0;
+		for (f = 0; f < 6; f++) {
+			if (p->mat[p->wallmat[f]].rhos > 0.0) spec = 1;
+		}
+		if (spec && (p->canopy.on || (p->nocc > 0))) {
+			fprintf(stderr, "*** specular walls cannot be combined with canopy / occluder yet\n");
+			fprintf(stderr, "    (the mirror-image method folds the path; the canopy path length\n");
+			fprintf(stderr, "     and the shadow test would be wrong)\n");
+			return 1;
+		}
 	}
 
 	return 0;

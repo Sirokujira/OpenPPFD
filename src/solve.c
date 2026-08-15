@@ -116,7 +116,8 @@ static void energy_balance(ppfd_t *p)
 	p->flux_total = 0.0;
 	p->watt_total = 0.0;
 	p->ppf_total = 0.0;
-	for (ie = 0; ie < p->nemit; ie++) {
+	/* 鏡像は実在の光源ではないので総量には数えない */
+	for (ie = 0; ie < p->nemit - p->nimage; ie++) {
 		const emitter_t *e = &p->emit[ie];
 		p->flux_total += e->flux;
 		p->watt_total += e->watt;
@@ -131,7 +132,10 @@ static void energy_balance(ppfd_t *p)
 		const double *Ei = &p->Einc[(size_t)ip * nl];
 		double w = 0.0;
 		for (il = 0; il < nl; il++) {
-			E[il] = Ei[il] * (1.0 - m->rho[il]);
+			/* 鏡面成分は鏡像が運ぶので、壁が吸収するのは 1 - rho_d - rho_s */
+			double a = 1.0 - m->rho[il] - m->rhos;
+			if (a < 0.0) a = 0.0;
+			E[il] = Ei[il] * a;
 			w += E[il];
 		}
 		p->absorb_wall += p->patch[ip].area * w;
@@ -180,6 +184,12 @@ void solve(ppfd_t *p)
 		/* 遮蔽が部分的な対だけは標本化 (= 厳密でない) なので数を出す */
 		plog(p, "occluders   : %d, partially shadowed patch pairs = %d, enclosed patches = %d\n",
 			p->nocc, p->ff_npartial, p->ff_nblind);
+	}
+
+	setup_images(p);
+	if (p->nimage > 0) {
+		plog(p, "specular : %d mirror images (%d bounces), truncated flux = %.3e W\n",
+			p->nimage, p->specbounce, p->spec_lost);
 	}
 
 	t0 = cputime();

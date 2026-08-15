@@ -73,7 +73,11 @@ void output_log(ppfd_t *p)
 	plog(p, "chamber      : %g x %g x %g m\n", p->Lx, p->Ly, p->Lz);
 	plog(p, "wavelength   : %g - %g nm, %g nm step (%d bins)\n",
 		p->lam0, p->lam0 + ((nl - 1) * p->dlam), p->dlam, nl);
-	plog(p, "sources      : %d\n", p->nemit);
+	plog(p, "sources      : %d\n", p->nemit - p->nimage);
+	if (p->nimage > 0) {
+		plog(p, "specular     : %d mirror images, %d bounces, truncated %.3e W\n",
+			p->nimage, p->specbounce, p->spec_lost);
+	}
 	plog(p, "photoperiod  : %g h/day\n", p->photoperiod);
 	for (ie = 0; ie < p->nocc; ie++) {
 		const occluder_t *o = &p->occ[ie];
@@ -98,7 +102,7 @@ void output_log(ppfd_t *p)
 	}
 
 	/* 光源側の総量 */
-	for (ie = 0; ie < p->nemit; ie++) {
+	for (ie = 0; ie < p->nemit - p->nimage; ie++) {
 		const emitter_t *e = &p->emit[ie];
 		double v = 0.0;
 		for (il = 0; il < nl; il++) v += p->spec[e->ispec].w[il] * p->vlambda[il];
