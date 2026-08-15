@@ -53,8 +53,9 @@ typedef struct {double x, y, z;} vec3_t;
 /* ---- 材料 (Lambert 拡散面 / 葉) ----------------------------------- */
 typedef struct {
 	char    name[NAMELEN];
-	double *rho;                    /* [nlam] 分光反射率 0..1 */
+	double *rho;                    /* [nlam] 拡散反射率 0..1 */
 	double *tau;                    /* [nlam] 分光透過率 0..1 (葉のみ使用) */
+	double  rhos;                   /* 鏡面反射率 0..1 (波長非依存。吸収 = 1-rho-rhos) */
 } pmat_t;
 
 /* ---- スペクトル (波長ビンごとの放射束の重み、総和 1) --------------- */
@@ -169,6 +170,9 @@ typedef struct {
 	int       maxiter;
 	double    converg;
 	int       msub;                 /* パッチ直接光の複合求積分割数 (0 = 自動) */
+	int       specbounce;           /* 鏡面反射の鏡像段数 (既定 2) */
+	int       nimage;               /* 生成した鏡像光源の数 (診断) */
+	double    spec_lost;            /* 段数打ち切りで失われた放射束 [W] (診断) */
 	double   *action;               /* [nlam] 光合成作用曲線 (McCree) */
 	double   *vlambda;              /* [nlam] 標準比視感度 V(λ) */
 
@@ -283,6 +287,7 @@ void    setup_ff(ppfd_t *);
 
 /* direct.c */
 void    direct_patch(ppfd_t *);
+void    setup_images(ppfd_t *);
 void    direct_point(const ppfd_t *, vec3_t, vec3_t, double *);
 void    direct_point_ex(const ppfd_t *, vec3_t, vec3_t, double *, double *, double *);
 

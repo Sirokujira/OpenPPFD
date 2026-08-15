@@ -299,6 +299,24 @@ chkabs "scatter: omega=1 no capture" "$(logval 'absorbed by canopy')" 0
 chk "scatter: omega=1 walls take all" "$(logval 'absorbed by walls')" 1.0 2e-3
 
 echo
+echo "== (k) specular walls (mirror-image method) =="
+run mirror.ppfd
+# E = Phi/(4 pi) (1/d1^2 + rho_s/d2^2), d1 = 0.5, d2 = 1.0, rho_s = 0.8
+EM=$(awk -v k="$KPH555" 'BEGIN {pi = 4 * atan2(1, 1); printf "%.9g", (1 / (4 * pi)) * ((1 / 0.25) + 0.8) * k}')
+chk "mirror: direct + image"    "$(cell ppfd_map_mid.csv 10 10 5)" "$EM" 2e-3
+# 鏡面が 1 面なら鏡像は自分自身の面で折り返さないので打ち切り誤差が無い
+chkabs "mirror: no truncation"  "$(awk '/^specular  / {print $9}' "$WORK/ppfd.log")" 0
+# 鏡面成分は鏡像が運ぶので、壁が吸収するのは (1 - rho_d - rho_s)。収支は閉じる
+chkabs "mirror: closure"        "$(logval 'closure error')" 1e-6
+chk "mirror: walls take all"    "$(logval 'absorbed by walls')" 1.0 1e-6
+# 鏡面反射率を 0 にすると鏡像が消え、直接光だけの解析解に戻る
+sed 's/^material = mirror gray 0.0 specular 0.8/material = mirror gray 0.0 specular 0.0/' \
+	"$SRC/mirror.ppfd" > "$WORK/mirror_off.ppfd"
+run mirror_off.ppfd
+E5=$(awk -v k="$KPH555" 'BEGIN {pi = 4 * atan2(1, 1); printf "%.9g", k / (4 * pi * 0.25)}')
+chk "mirror: rho_s=0 direct only" "$(cell ppfd_map_mid.csv 10 10 5)" "$E5" 2e-3
+
+echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2
 else
