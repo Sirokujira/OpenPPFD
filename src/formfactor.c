@@ -346,4 +346,73 @@ void setup_ff(ppfd_t *p)
 		p->ff_recip_err = rmax;
 		p->ff_nblind = nblind;
 	}
+
+	/*
+	■ 鏡面壁の拡張形態係数
+	拡散光が鏡面壁で正反射して届く経路を「放射側パッチの鏡像」として
+	加算する。軸並行の直方体では、キャビティ内の点から鏡像パッチへの
+	直線は必ず鏡面の矩形内で平面を横切る (鏡映が各座標を箱の範囲の
+	鏡像へ写すため) ので、空のチャンバではこの拡張は厳密になる。
+
+	これを入れないと、拡散壁からの放射が鏡面壁に当たったとき ρs 分が
+	どこにも運ばれずに消え、収支が ρs × (鏡面壁への拡散入射) だけ
+	破れる (実測 : 拡散床 ρd=0.6 + 鏡面天井 ρs=0.8 で closure -7.7%)。
+
+	放射側パッチが最初の折り返し面の上にある場合は除外する (鏡映で
+	自分自身に写り、直接項と二重計上になるため)。行和・相反則の診断は
+	拡張前の基本形態係数に対して計算してある (拡張後の行和は 1 を
+	超えるのが正しい : 鏡面壁への到達分は全量で数え、その続きの
+	正反射分も別項として数える帳簿だから)。
+
+	群落・遮蔽物との併用は入力段で弾かれているので、ここでは減衰も
+	可視率も考えなくてよい。
+	*/
+	{
+		strans_t *tr = (strans_t *)xmalloc((size_t)MAXSPECT * sizeof(strans_t));
+		const int nt = spec_transforms(p, tr, MAXSPECT);
+
+		if (nt > 0) {
+			int is;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic)
+#endif
+			for (is = 0; is < n; is++) {
+				vec3_t xs[144];
+				double ws[144];
+				const patch_t *qi = &p->patch[is];
+				const double si = patch_size(qi);
+				int it, j;
+
+				for (it = 0; it < nt; it++) {
+					for (j = 0; j < n; j++) {
+						const patch_t *qj = &p->patch[j];
+						vec3_t q4[4], nj, cj;
+						double dist, sj, f;
+						int    msub, nq, g, v;
+
+						if (qj->iface == tr[it].face[0]) continue;
+						for (v = 0; v < 4; v++) q4[v] = spec_apply(p, &tr[it], qj->p[v]);
+						nj = spec_apply_dir(&tr[it], qj->n);
+						cj = spec_apply(p, &tr[it], qj->c);
+
+						sj = patch_size(qj);
+						dist = v_norm(v_sub(cj, qi->c));
+						msub = (dist < (0.75 * (si + sj))) ? 4 : ((dist < (2.0 * (si + sj))) ? 2 : 1);
+						nq = rect_quad(qi, msub, xs, ws);
+
+						f = 0.0;
+						for (g = 0; g < nq; g++) {
+							/* 鏡像パッチの表側にある求積点だけが受け取る */
+							if (v_dot(nj, v_sub(xs[g], q4[0])) <= 0.0) continue;
+							f += ws[g] * ff_point_poly(xs[g], qi->n, q4, 4);
+						}
+						p->ff[((size_t)is * n) + j] += tr[it].w * f;
+					}
+				}
+			}
+			plog(p, "specular ff : %d mirror transforms folded into the form factors%s\n",
+				nt, (nt >= MAXSPECT) ? " (CAPPED - increase MAXSPECT)" : "");
+		}
+		free(tr);
+	}
 }

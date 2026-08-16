@@ -887,6 +887,20 @@ int input_data(FILE *fp, ppfd_t *p)
 		for (f = 0; f < 6; f++) {
 			if (p->mat[p->wallmat[f]].rhos > 0.0) spec = 1;
 		}
+		/* 反射率の合計が 1 を超える材料は非物理 (収支の検証も壊れる) */
+		if (spec) {
+			int im2, il2;
+			for (im2 = 0; im2 < p->nmat; im2++) {
+				if (p->mat[im2].rhos <= 0.0) continue;
+				for (il2 = 0; il2 < p->nlam; il2++) {
+					if (p->mat[im2].rho[il2] + p->mat[im2].rhos > 1.0 + 1e-12) {
+						fprintf(stderr, "*** material \"%s\" : rho_d + rho_s > 1\n",
+							p->mat[im2].name);
+						return 1;
+					}
+				}
+			}
+		}
 		if (spec && (p->canopy.on || (p->nocc > 0))) {
 			fprintf(stderr, "*** specular walls cannot be combined with canopy / occluder yet\n");
 			fprintf(stderr, "    (the mirror-image method folds the path; the canopy path length\n");

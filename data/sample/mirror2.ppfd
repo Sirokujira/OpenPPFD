@@ -1,0 +1,43 @@
+# 検証 (l) 鏡面壁と拡散壁の混在 (拡張形態係数)
+#
+# 天井を完全鏡面 (rho_s = 1.0)、床を拡散 (rho_d = 0.6)、側壁を黒にする。
+# 拡散床からの放射が鏡面天井で正反射して床へ戻る経路が、拡張形態係数
+# (放射側パッチの鏡像) で運ばれる。これを入れないと rho_s x (鏡面壁への
+# 拡散入射) が帳簿から消え、収支が数 % 破れる (実測 : rho_s=0.8,
+# rho_d=0.6 で closure -7.7%)。
+#
+# ■ 二重箱等価 (mirror2ref.ppfd と比較する)
+# 完全鏡面 (rho_s = 1) の天井 z = 0.5 は「鏡映した幾何」と厳密に等価 :
+#   - チャンバを z 方向に 2 倍 (高さ 1.0) にし、
+#   - 天井 (z = 1) を床と同じ拡散材 (床の鏡像) にし、
+#   - 光源の鏡像 (z = 2*0.5 - 0.3 = 0.7) を実光源として置く
+# と、折り返した全経路 (直接光も多重拡散反射も) が 1 対 1 に対応する。
+# 側壁は黒なので高さが変わっても再放射に影響しない。
+# 両者の床上センサの分布は求積の丸めまで一致するはず (許容 1e-6)。
+#
+# 鏡面は 1 面だけなので鏡像も変換も 1 個で厳密 (truncated = 0)。
+
+OpenPPFD 1 0
+title = specular ceiling + diffuse floor (folded-geometry equivalence)
+
+wavelength = 380 780 5
+chamber    = 1.0 1.0 0.5
+patchdiv   = 6 6
+
+material = black  gray 0.0
+material = white  gray 0.6
+material = mirror gray 0.0 specular 1.0
+
+wall = all  black
+wall = zmin white
+wall = zmax mirror
+
+spectrum = na555 mono 555
+
+led = 0.5 0.5 0.3 1.0 na555 iso
+
+target      = mid 0.2 21 21
+photoperiod = 16
+specbounce  = 1
+
+end

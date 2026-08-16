@@ -159,6 +159,72 @@ void setup_images(ppfd_t *p)
 }
 
 /*
+鏡面反射の変換列を列挙する (拡散光の輸送用)。
+
+face[0] が放射側に最も近い折り返し、face[nmir-1] が受光側に最も近い
+折り返し。同じ面で 2 回続けては折り返さない (恒等になる)。列挙の規則は
+setup_images の鏡像光源と同一なので、直接光と拡散光で経路の数え方が
+食い違わない。戻り値 = 変換の数 (maxn で打ち切り)。
+*/
+int spec_transforms(const ppfd_t *p, strans_t *tr, int maxn)
+{
+	double rs[6];
+	int    f, lev, k, n = 0, beg, end;
+
+	for (f = 0; f < 6; f++) rs[f] = p->mat[p->wallmat[f]].rhos;
+
+	for (f = 0; f < 6; f++) {
+		if ((rs[f] <= 0.0) || (n >= maxn)) continue;
+		tr[n].nmir = 1;
+		tr[n].face[0] = f;
+		tr[n].w = rs[f];
+		n++;
+	}
+	beg = 0;
+	end = n;
+	for (lev = 2; lev <= p->specbounce; lev++) {
+		for (k = beg; k < end; k++) {
+			const int last = tr[k].face[tr[k].nmir - 1];
+			for (f = 0; f < 6; f++) {
+				if ((rs[f] <= 0.0) || (f == last) || (n >= maxn)) continue;
+				tr[n] = tr[k];
+				tr[n].face[tr[n].nmir] = f;
+				tr[n].nmir++;
+				tr[n].w *= rs[f];
+				n++;
+			}
+		}
+		beg = end;
+		end = n;
+	}
+	return n;
+}
+
+/* 変換列を点に適用する (face[0] から順に鏡映) */
+vec3_t spec_apply(const ppfd_t *p, const strans_t *t, vec3_t a)
+{
+	int    k, axis;
+	double val;
+
+	for (k = 0; k < t->nmir; k++) {
+		face_plane(p, t->face[k], &axis, &val);
+		a = mirror_point(a, axis, val);
+	}
+	return a;
+}
+
+/* 変換列を方向ベクトルに適用する */
+vec3_t spec_apply_dir(const strans_t *t, vec3_t a)
+{
+	int k;
+
+	for (k = 0; k < t->nmir; k++) {
+		a = mirror_dir(a, t->face[k] / 2);
+	}
+	return a;
+}
+
+/*
 点 x (単位法線 n) における全光源からの直接分光放射照度 [W/m²] を
 E[0..nlam-1] に加算する (E は呼び出し側でゼロ初期化しておく)。
 */

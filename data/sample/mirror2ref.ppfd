@@ -1,0 +1,30 @@
+# 検証 (l) の参照解 : mirror2.ppfd の鏡面天井を「鏡映した幾何」で置き換えたもの
+#
+# 高さを 2 倍 (1.0 m) にし、天井 (z = 1) を床の鏡像 (同じ拡散材 rho_d = 0.6)、
+# 光源の鏡像 (z = 0.7) を実光源として置く。完全鏡面 (rho_s = 1) の折り返しと
+# 厳密に等価で、鏡面のコードを一切通らない。mirror2.ppfd の床上センサと
+# この入力の床上センサは求積の丸めまで一致する。
+
+OpenPPFD 1 0
+title = folded-geometry reference for mirror2 (no specular code path)
+
+wavelength = 380 780 5
+chamber    = 1.0 1.0 1.0
+patchdiv   = 6 6
+
+material = black gray 0.0
+material = white gray 0.6
+
+wall = all  black
+wall = zmin white
+wall = zmax white
+
+spectrum = na555 mono 555
+
+led = 0.5 0.5 0.3 1.0 na555 iso
+led = 0.5 0.5 0.7 1.0 na555 iso
+
+target      = mid 0.2 21 21
+photoperiod = 16
+
+end
