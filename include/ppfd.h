@@ -78,6 +78,14 @@ typedef struct {
 	double  watt;                   /* ファイル記載の消費電力 [W] (参考値) */
 } photdist_t;
 
+/* ---- 鏡面反射の変換列 (鏡像の折り返し面の並び) ---------------------- */
+#define MAXSPECT 512                /* 変換数の上限 (超えたらログに出して打ち切る) */
+typedef struct {
+	int     nmir;                   /* 折り返し回数 (1..specbounce) */
+	int     face[6];                /* face[0] = 放射側に最も近い折り返し面 */
+	double  w;                      /* 重み = Π ρs */
+} strans_t;
+
 /* ---- 光源 --------------------------------------------------------- */
 typedef struct {
 	vec3_t  pos;                    /* 中心位置 [m] */
@@ -288,6 +296,9 @@ void    setup_ff(ppfd_t *);
 /* direct.c */
 void    direct_patch(ppfd_t *);
 void    setup_images(ppfd_t *);
+int     spec_transforms(const ppfd_t *, strans_t *, int);
+vec3_t  spec_apply(const ppfd_t *, const strans_t *, vec3_t);
+vec3_t  spec_apply_dir(const strans_t *, vec3_t);
 void    direct_point(const ppfd_t *, vec3_t, vec3_t, double *);
 void    direct_point_ex(const ppfd_t *, vec3_t, vec3_t, double *, double *, double *);
 

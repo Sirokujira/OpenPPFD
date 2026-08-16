@@ -317,6 +317,31 @@ E5=$(awk -v k="$KPH555" 'BEGIN {pi = 4 * atan2(1, 1); printf "%.9g", k / (4 * pi
 chk "mirror: rho_s=0 direct only" "$(cell ppfd_map_mid.csv 10 10 5)" "$E5" 2e-3
 
 echo
+echo "== (l) specular + diffuse interreflection (extended form factors) =="
+# 拡散床の放射が鏡面天井で正反射して戻る経路 (拡張形態係数)。
+# これが無いと rho_s x (鏡面壁への拡散入射) が消え、収支が数 % 破れる。
+run mirror2.ppfd
+cp "$WORK/ppfd_map_mid.csv" "$WORK/map_spec.csv"
+chkabs "specdiff: closure (rho_s=1)" "$(logval 'closure error')" 1e-5
+chkabs "specdiff: no truncation"     "$(awk '/^specular  / {print $9}' "$WORK/ppfd.log")" 0
+# 二重箱等価 : 完全鏡面の折り返し = 鏡映した幾何 (鏡面コードを通らない参照解)
+run mirror2ref.ppfd
+chkabs "specdiff: folded equivalence" "$(maxdiff map_spec.csv ppfd_map_mid.csv)" 1e-6
+# 部分鏡面 (rho_s = 0.8) でも収支が閉じる (修正前は -7.7% 破れていた)
+sed 's/specular 1.0/specular 0.8/' "$SRC/mirror2.ppfd" > "$WORK/mirror2p.ppfd"
+run mirror2p.ppfd
+chkabs "specdiff: closure (rho_s=.8)" "$(logval 'closure error')" 1e-5
+# 非物理な材料 (rho_d + rho_s > 1) は入力段で弾かれる
+sed 's/^material = white  gray 0.6/material = white  gray 0.6 specular 0.5/' \
+	"$SRC/mirror2.ppfd" > "$WORK/mirror2bad.ppfd"
+if (cd "$WORK" && "$OPPFD" mirror2bad.ppfd > /dev/null 2>&1); then
+	echo "specdiff: rho_d+rho_s>1 rejected -> NG (accepted invalid material)" >&2
+	status=1
+else
+	echo "specdiff: rho_d+rho_s>1 rejected -> OK"
+fi
+
+echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2
 else

@@ -25,6 +25,8 @@ static void gather_target(ppfd_t *p)
 	const int nl = p->nlam;
 	double *kext = (double *)xcalloc((size_t)nl, sizeof(double));
 	vec3_t  ctop[4], cbot[4];
+	strans_t *str = (strans_t *)xmalloc((size_t)MAXSPECT * sizeof(strans_t));
+	const int nstr = spec_transforms(p, str, MAXSPECT);
 	int     it, i;
 
 	if (p->canopy.on && p->canopy.scatter) {
@@ -59,7 +61,7 @@ static void gather_target(ppfd_t *p)
 			const vec3_t nz = {0.0, 0.0, 1.0};
 			const vec3_t x = {t->x0 + ((ix + 0.5) * dx), t->y0 + ((iy + 0.5) * dy), t->z};
 			double *E = &t->E[(size_t)ic * nl];
-			int ip, il;
+			int ip, il, i2;
 
 			direct_point(p, x, nz, E);
 
@@ -100,9 +102,30 @@ static void gather_target(ppfd_t *p)
 					}
 				}
 			}
+
+			/* 鏡面壁ごしの拡散光 (鏡像パッチからの寄与。setup_ff の拡張と同じ帳簿) */
+			for (i2 = 0; i2 < nstr; i2++) {
+				for (ip = 0; ip < n; ip++) {
+					const patch_t *q = &p->patch[ip];
+					const double *B = &p->B[(size_t)ip * nl];
+					vec3_t q4[4], nj;
+					double f;
+					int    v;
+					if (q->iface == str[i2].face[0]) continue;
+					for (v = 0; v < 4; v++) q4[v] = spec_apply(p, &str[i2], q->p[v]);
+					nj = spec_apply_dir(&str[i2], q->n);
+					if (v_dot(nj, v_sub(x, q4[0])) <= 0.0) continue;
+					f = str[i2].w * ff_point_poly(x, nz, q4, 4);
+					if (f <= 0.0) continue;
+					for (il = 0; il < nl; il++) {
+						E[il] += B[il] * f;
+					}
+				}
+			}
 		}
 	}
 
+	free(str);
 	free(kext);
 }
 
