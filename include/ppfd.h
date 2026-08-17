@@ -189,6 +189,9 @@ typedef struct {
 	patch_t  *patch;
 	double   *ff;                   /* [npatch*npatch] 形態係数 F_ij */
 	float    *plen;                 /* [npatch*npatch] 群落内の経路長 [m] */
+	int       nst;                  /* 分離保持している鏡面変換の数 (群落併用時のみ非 0) */
+	double   *ffs;                  /* [nst*npatch*npatch] 鏡面拡張の形態係数 */
+	float    *plens;                /* [nst*npatch*npatch] 鏡像経路の群落内経路長 [m] */
 	double   *Ed;                   /* [npatch*nlam] 直接放射照度 [W/m²] */
 	double   *B;                    /* [npatch*nlam] 放射発散度 [W/m²] */
 	double   *Einc;                 /* [npatch*nlam] 入射放射照度 (直接+間接) */

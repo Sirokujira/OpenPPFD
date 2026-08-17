@@ -1,0 +1,33 @@
+# 検証 (m) の参照解 : mirror3.ppfd の鏡面側壁を「x 方向に 2 倍にした幾何」で
+# 置き換えたもの。鏡面のコードを一切通らない。
+#
+# patchdiv 12 6 は床 (u = x 方向) のセルを 2/12 = 1/6 にして、
+# mirror3.ppfd の床パッチ (1/6) とその鏡像に厳密に揃えるための値。
+# 拡散面は床だけなので、他の面の分割の違いは結果に影響しない (黒壁)。
+# 群落スラブは z だけで決まるので同じ 1 行が全域を覆う。
+
+OpenPPFD 1 0
+title = folded-geometry reference for mirror3 (no specular code path)
+
+wavelength = 380 780 5
+chamber    = 2.0 1.0 1.0
+patchdiv   = 12 6
+
+material = black gray 0.0
+material = white gray 0.6
+material = leaf  gray 0.1 0.1
+
+wall = all  black
+wall = zmin white
+
+canopy = 0.8 0.4 1.0 0.5 leaf
+
+spectrum = na555 mono 555
+
+led = 0.3 0.5 0.9 1.0 na555 iso
+led = 1.7 0.5 0.9 1.0 na555 iso
+
+target      = mid 0.05 12 6 0 1 0 1
+photoperiod = 16
+
+end

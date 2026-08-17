@@ -1,0 +1,49 @@
+# 検証 (m) 鏡面側壁 + 群落 (直線評価の群落減衰が厳密なまま成り立つ)
+#
+# 側壁 x = 1 を完全鏡面 (rho_s = 1.0)、床を拡散 (rho_d = 0.6)、他を黒に
+# して、群落スラブ z = 0.4..0.8 (LAI 1.0, G 0.5, 葉 omega = 0.2) を置く。
+#
+# ■ なぜ側壁の鏡面は群落と厳密に両立するか
+# 側壁 (x/y 面) の鏡映は z 座標を保つ。群落スラブは z だけで決まるので
+# 鏡映で不変になり、折り返した実経路の z プロファイル (弧長に対する z)
+# は「鏡像への直線」の z プロファイルと同一。群落の減衰・経路長は
+# z プロファイルと総長だけで決まるから、直線評価のままで厳密になる。
+# (床・天井の鏡面はスラブが鏡映で動くので不可 : 入力段で弾かれる)
+#
+# ■ 二重箱等価 (mirror3ref.ppfd と比較)
+# 完全鏡面の側壁 x = 1 は「x 方向に 2 倍にした幾何」と厳密に等価 :
+#   - チャンバを x で 2 倍 (2 x 1 x 1)、床の分割も x 方向に 2 倍 (12 6)
+#   - 床は同じ拡散材 (自分の鏡像)、他の壁は黒のまま
+#   - 光源の鏡像 (2*1 - 0.3 = 1.7) を実光源として置く
+#   - 群落スラブは z だけで決まるので同じ 1 行のまま全域を覆う
+# 直接光 (鏡像光源が群落を横切る分を含む)・拡張形態係数の減衰・
+# 測定面の鏡像項がすべて 1 対 1 に対応し、床上センサの分布は求積の
+# 丸めまで一致する (許容 1e-6)。
+
+OpenPPFD 1 0
+title = specular side wall + canopy (folded-geometry equivalence)
+
+wavelength = 380 780 5
+chamber    = 1.0 1.0 1.0
+patchdiv   = 6 6
+
+material = black  gray 0.0
+material = white  gray 0.6
+material = mirror gray 0.0 specular 1.0
+material = leaf   gray 0.1 0.1
+
+wall = all  black
+wall = zmin white
+wall = xmax mirror
+
+canopy = 0.8 0.4 1.0 0.5 leaf
+
+spectrum = na555 mono 555
+
+led = 0.3 0.5 0.9 1.0 na555 iso
+
+target      = mid 0.05 12 6
+photoperiod = 16
+specbounce  = 1
+
+end

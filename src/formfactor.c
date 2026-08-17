@@ -371,6 +371,24 @@ void setup_ff(ppfd_t *p)
 		strans_t *tr = (strans_t *)xmalloc((size_t)MAXSPECT * sizeof(strans_t));
 		const int nt = spec_transforms(p, tr, MAXSPECT);
 
+		/*
+		群落があるときは ff へ畳み込まず分離保持する。鏡像経路の群落内
+		経路長は直接経路と異なるので、減衰を掛けるには項を分けておく
+		必要がある (側壁の鏡映は z を保つため、鏡像重心への直線の
+		z プロファイル = 折り返した実経路の z プロファイル。したがって
+		直線評価の canopy_path で厳密)。群落が無ければ従来どおり畳み込む。
+		*/
+		if ((nt > 0) && p->canopy.on) {
+			if ((size_t)nt * (size_t)n * (size_t)n > (size_t)32 * 1024 * 1024) {
+				fprintf(stderr, "*** specular + canopy : too many transform entries "
+					"(reduce patchdiv or specbounce)\n");
+				exit(1);
+			}
+			p->nst = nt;
+			p->ffs = (double *)xcalloc((size_t)nt * n * n, sizeof(double));
+			p->plens = (float *)xcalloc((size_t)nt * n * n, sizeof(float));
+		}
+
 		if (nt > 0) {
 			int is;
 #ifdef _OPENMP
@@ -406,12 +424,20 @@ void setup_ff(ppfd_t *p)
 							if (v_dot(nj, v_sub(xs[g], q4[0])) <= 0.0) continue;
 							f += ws[g] * ff_point_poly(xs[g], qi->n, q4, 4);
 						}
-						p->ff[((size_t)is * n) + j] += tr[it].w * f;
+						if (p->nst > 0) {
+							const size_t k = ((size_t)it * n * n) + ((size_t)is * n) + j;
+							p->ffs[k] = tr[it].w * f;
+							p->plens[k] = (float)canopy_path(p, qi->c, cj);
+						}
+						else {
+							p->ff[((size_t)is * n) + j] += tr[it].w * f;
+						}
 					}
 				}
 			}
-			plog(p, "specular ff : %d mirror transforms folded into the form factors%s\n",
-				nt, (nt >= MAXSPECT) ? " (CAPPED - increase MAXSPECT)" : "");
+			plog(p, "specular ff : %d mirror transforms %s\n",
+				nt, (p->nst > 0) ? "kept separate (canopy attenuation per folded path)"
+				                 : "folded into the form factors");
 		}
 		free(tr);
 	}

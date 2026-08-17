@@ -109,7 +109,7 @@ static void gather_target(ppfd_t *p)
 					const patch_t *q = &p->patch[ip];
 					const double *B = &p->B[(size_t)ip * nl];
 					vec3_t q4[4], nj;
-					double f;
+					double f, s;
 					int    v;
 					if (q->iface == str[i2].face[0]) continue;
 					for (v = 0; v < 4; v++) q4[v] = spec_apply(p, &str[i2], q->p[v]);
@@ -117,8 +117,17 @@ static void gather_target(ppfd_t *p)
 					if (v_dot(nj, v_sub(x, q4[0])) <= 0.0) continue;
 					f = str[i2].w * ff_point_poly(x, nz, q4, 4);
 					if (f <= 0.0) continue;
-					for (il = 0; il < nl; il++) {
-						E[il] += B[il] * f;
+					/* 鏡像重心への直線 = 折り返した経路の z プロファイル (側壁鏡) */
+					s = canopy_path(p, x, spec_apply(p, &str[i2], q->c));
+					if (s > 0.0) {
+						for (il = 0; il < nl; il++) {
+							E[il] += B[il] * f * exp(-kext[il] * s);
+						}
+					}
+					else {
+						for (il = 0; il < nl; il++) {
+							E[il] += B[il] * f;
+						}
 					}
 				}
 			}
