@@ -80,6 +80,24 @@ void solve_radiosity(ppfd_t *p)
 					M[k] = (s > 0.0) ? (p->ff[k] * exp(-kext * s)) : p->ff[k];
 				}
 			}
+			/* 鏡面拡張 : 鏡像経路それぞれの経路長で減衰させて加算する */
+			if (p->nst > 0) {
+				int t;
+				for (t = 0; t < p->nst; t++) {
+					const double *fs = &p->ffs[(size_t)t * n * n];
+					const float  *ps = &p->plens[(size_t)t * n * n];
+#ifdef _OPENMP
+#pragma omp parallel for private(j) schedule(static)
+#endif
+					for (i = 0; i < n; i++) {
+						for (j = 0; j < n; j++) {
+							const size_t k = ((size_t)i * n) + j;
+							const double s = ps[k];
+							M[k] += (s > 0.0) ? (fs[k] * exp(-kext * s)) : fs[k];
+						}
+					}
+				}
+			}
 			F = M;
 		}
 		else {

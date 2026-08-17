@@ -342,6 +342,41 @@ else
 fi
 
 echo
+echo "== (m) specular side wall + canopy =="
+# 側壁の鏡映は z を保つので群落スラブ (z だけで決まる) は鏡映で不変。
+# 折り返した経路の z プロファイル = 鏡像への直線の z プロファイルとなり、
+# 群落減衰は直線評価のまま厳密。完全鏡面 (rho_s=1) の側壁は
+# 「x 方向に 2 倍にした幾何 + 光源の鏡像」と厳密に等価。
+run mirror3.ppfd
+cp "$WORK/ppfd_map_mid.csv" "$WORK/map_m3.csv"
+M3AVG=$(sumval 5)
+run mirror3ref.ppfd
+chkabs "speccan: folded equivalence" "$(maxdiff map_m3.csv ppfd_map_mid.csv)" 1e-6
+# 鏡を外すと床の平均 PPFD は下がる (鏡像の寄与の符号判定)
+sed 's/specular 1.0/specular 0.0/' "$SRC/mirror3.ppfd" > "$WORK/mirror3off.ppfd"
+run mirror3off.ppfd
+awk -v m="$M3AVG" -v o="$(sumval 5)" 'BEGIN {
+	printf "%-28s mirror=%.6g  off=%.6g -> %s (mirror must add light)\n", \
+		"speccan: mirror adds PPFD", m, o, (m > o) ? "OK" : "NG";
+	exit (m > o) ? 0 : 1
+}' || status=1
+# 併用できない組み合わせは入力段で弾かれる
+sed 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/mirror3.ppfd" > "$WORK/mirror3ls.ppfd"
+if (cd "$WORK" && "$OPPFD" mirror3ls.ppfd > /dev/null 2>&1); then
+	echo "speccan: +leafscatter rejected -> NG (accepted invalid combo)" >&2
+	status=1
+else
+	echo "speccan: +leafscatter rejected -> OK"
+fi
+sed 's/^wall = xmax mirror/wall = zmax mirror/' "$SRC/mirror3.ppfd" > "$WORK/mirror3z.ppfd"
+if (cd "$WORK" && "$OPPFD" mirror3z.ppfd > /dev/null 2>&1); then
+	echo "speccan: z-mirror rejected -> NG (accepted invalid combo)" >&2
+	status=1
+else
+	echo "speccan: z-mirror rejected -> OK"
+fi
+
+echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2
 else
