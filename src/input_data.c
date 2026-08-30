@@ -909,18 +909,13 @@ int input_data(FILE *fp, ppfd_t *p)
 		}
 		if (spec && p->canopy.on) {
 			/*
-			側壁 (x/y 面) の鏡映は z を保つので、z だけで決まる群落スラブは
-			鏡映で不変。折り返した経路の z プロファイル = 鏡像への直線の
-			z プロファイルとなり、群落減衰は直線評価のまま厳密に扱える。
-			床・天井の鏡面はスラブが鏡映で動くので未対応 (黙って誤差を
-			出さないため弾く)。散乱の還流も鏡像経路の預け入れが要るため未対応。
+			側壁 (x/y 面) の鏡映は z を保つので群落スラブは鏡映で不変。
+			床・天井の鏡映はスラブを動かすが、鏡像への直線の z を周期 2Lz の
+			三角波で折り返せば実経路の z プロファイルが厳密に得られるので、
+			canopy_path (geometry.c) がその折り返しで経路長を測る。どちらも
+			弧長は鏡映で保たれるため、群落減衰は鏡像への直線のまま厳密。
+			散乱の還流だけは鏡像経路ぶんの層への預け入れが要るため未対応。
 			*/
-			if ((p->mat[p->wallmat[4]].rhos > 0.0) || (p->mat[p->wallmat[5]].rhos > 0.0)) {
-				fprintf(stderr, "*** a specular floor/ceiling cannot be combined with a canopy\n");
-				fprintf(stderr, "    (mirroring in z moves the canopy slab; only specular side\n");
-				fprintf(stderr, "     walls are exact with the straight-ray canopy attenuation)\n");
-				return 1;
-			}
 			if (p->canopy.scatter) {
 				fprintf(stderr, "*** specular walls cannot be combined with leafscatter yet\n");
 				return 1;

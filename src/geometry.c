@@ -215,19 +215,104 @@ void setup_target(ppfd_t *p)
 	}
 }
 
-/* 線分 a-b のうち群落スラブ内にある部分の長さ [m] */
+/*
+鏡像へ引いた直線の z 座標を実経路の z 座標へ写す「折り返し」。
+
+床・天井が鏡面のとき、鏡像への直線は箱型ビリヤードの展開そのものなので、
+実経路の z は周期 P = 2Lz の三角波
+
+    fold(z) = w        (w = z mod P,  w <= Lz)
+            = P - w    (w > Lz)
+
+で与えられる (床・天井で何回反射しても成り立つ)。両端が箱の内側にある
+実在の線分では恒等写像になるため、鏡面が無い入力の結果は変わらない。
+*/
+static double fold_z(const ppfd_t *p, double z)
+{
+	const double period = 2.0 * p->Lz;
+	double w;
+
+	if ((z >= 0.0) && (z <= p->Lz)) return z;
+	if (period <= 0.0) return z;
+
+	w = z - (period * floor(z / period));
+	if (w < 0.0) w = 0.0;               /* 丸めで負に振れたときの保険 */
+	if (w > period) w = period;
+	return (w <= p->Lz) ? w : (period - w);
+}
+
+/* 区間 [a0,a1] と [b0,b1] の重なりの長さ */
+static double overlap1d(double a0, double a1, double b0, double b1)
+{
+	const double lo = (a0 > b0) ? a0 : b0;
+	const double hi = (a1 < b1) ? a1 : b1;
+
+	return (hi > lo) ? (hi - lo) : 0.0;
+}
+
+/*
+直線の z 範囲 [zlo,zhi] のうち fold(z) が群落スラブに入る z の測度。
+fold の逆像は周期 P ごとに現れる 2 本の区間の和 :
+
+    A_k = [zbot + kP, ztop + kP]      (上りの枝)
+    B_k = [kP - ztop, kP - zbot]      (下りの枝)
+
+zbot = 0 や ztop = Lz でも 2 本が接するだけなので二重計上にならない。
+*/
+static double fold_measure(const ppfd_t *p, double zlo, double zhi)
+{
+	const canopy_t *cp = &p->canopy;
+	const double period = 2.0 * p->Lz;
+	double sum = 0.0;
+	int    k, k0, k1;
+
+	if (period <= 0.0) return overlap1d(zlo, zhi, cp->zbot, cp->ztop);
+
+	k0 = (int)floor((zlo - cp->ztop) / period);
+	k1 = (int)ceil((zhi + cp->ztop) / period);
+	for (k = k0; k <= k1; k++) {
+		const double o = (double)k * period;
+		sum += overlap1d(zlo, zhi, cp->zbot + o, cp->ztop + o);
+		sum += overlap1d(zlo, zhi, o - cp->ztop, o - cp->zbot);
+	}
+	return sum;
+}
+
+/*
+線分 a-b のうち群落スラブ内にある部分の長さ [m]。
+
+床・天井が鏡面のとき、端点が箱の外にある線分は鏡像への直線なので
+折り返した実経路で測る。鏡映は弧長を保つので「直線の z がスラブの逆像に
+入っている割合 × 全長」が実経路の群落内長さと厳密に一致する。
+*/
 double canopy_path(const ppfd_t *p, vec3_t a, vec3_t b)
 {
 	const canopy_t *cp = &p->canopy;
 	const vec3_t d = v_sub(b, a);
 	const double len = v_norm(d);
+	/*
+	折り返すのは「床・天井が鏡面のときに箱の外へ出る線分」= 鏡像への直線
+	だけ。z の鏡面が無ければ従来どおり直線で測る (鏡面を使わない入力の
+	結果を変えないため。箱の外に置かれた光源等もそのまま扱う)。
+	*/
+	const int zmir = (p->mat[p->wallmat[4]].rhos > 0.0) ||
+	                 (p->mat[p->wallmat[5]].rhos > 0.0);
+	const int fold = zmir && !((a.z >= 0.0) && (a.z <= p->Lz) &&
+	                           (b.z >= 0.0) && (b.z <= p->Lz));
 	double t0, t1, lo, hi;
 
 	if (!cp->on || (len < EPS)) return 0.0;
 
 	if (fabs(d.z) < (EPS * (len + 1.0))) {
 		/* ほぼ水平な線分 : 全体がスラブ内かどうか */
-		return ((a.z >= cp->zbot) && (a.z <= cp->ztop)) ? len : 0.0;
+		const double z = fold ? fold_z(p, a.z) : a.z;
+		return ((z >= cp->zbot) && (z <= cp->ztop)) ? len : 0.0;
+	}
+
+	if (fold) {
+		const double zlo = (a.z < b.z) ? a.z : b.z;
+		const double zhi = (a.z < b.z) ? b.z : a.z;
+		return (fold_measure(p, zlo, zhi) / fabs(d.z)) * len;
 	}
 
 	t0 = (cp->zbot - a.z) / d.z;
