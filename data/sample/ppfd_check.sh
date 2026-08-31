@@ -368,12 +368,47 @@ if (cd "$WORK" && "$OPPFD" mirror3ls.ppfd > /dev/null 2>&1); then
 else
 	echo "speccan: +leafscatter rejected -> OK"
 fi
-sed 's/^wall = xmax mirror/wall = zmax mirror/' "$SRC/mirror3.ppfd" > "$WORK/mirror3z.ppfd"
-if (cd "$WORK" && "$OPPFD" mirror3z.ppfd > /dev/null 2>&1); then
-	echo "speccan: z-mirror rejected -> NG (accepted invalid combo)" >&2
+
+echo
+echo "== (n) specular ceiling + canopy (folded path attenuation) =="
+# z の鏡映は群落スラブを動かすので、鏡像への直線をそのまま測ると誤る。
+# 鏡像への直線は箱型ビリヤードの展開なので、実経路の z は周期 2Lz の
+# 三角波で厳密に得られる (canopy_path)。ztop = Lz にしてあるので効果は
+# 最大 : この折り返しを落とすと下の等価判定が 8.2e-2 まで悪化する。
+#
+# (1) 直接光だけの解析解。壁をすべて黒にし測定面を 1 セル (中心 0.5,0.5) に
+#     すると、残るのは実光源 (z=0.75) と鏡像 (z=1.25) の 2 本だけ :
+#       E = Phi/(4 pi) * [ 1/0.70^2 * exp(-k*0.25) + 1/1.20^2 * exp(-k*0.75) ]
+#     鏡像側の経路長 0.75 が折り返しの値 (素の直線評価なら 0.50)。
+#     k = G * a * sqrt(1-omega) = 0.5 * (1.0/0.5) * sqrt(0.8) = 0.8944272
+#     PPFD = E * 4.6394372 = 0.7335746 umol/m2/s
+sed -e 's/^wall = zmin white/wall = zmin black/' \
+    -e 's/^target      = base 0.05 12 6/target      = base 0.05 1 1/' \
+	"$SRC/mirror4.ppfd" > "$WORK/mirror4d.ppfd"
+run mirror4d.ppfd
+chk "speccan-z: folded direct" "$(sumval 5)" 0.7335746 1e-6
+# (2) 完全鏡面の天井は「z 方向に 2 倍にした幾何 + 光源の鏡像」と厳密に等価。
+#     群落は自分の鏡像と合体して 1 枚のスラブになる (LAI は厚みに比例)。
+run mirror4.ppfd
+cp "$WORK/ppfd_map_base.csv" "$WORK/map_m4.csv"
+M4AVG=$(sumval 5)
+run mirror4ref.ppfd
+chkabs "speccan-z: folded equivalence" "$(maxdiff map_m4.csv ppfd_map_base.csv)" 1e-6
+# (3) 鏡を外すと床の平均 PPFD は下がる (鏡像の寄与の符号判定)
+sed 's/specular 1.0/specular 0.0/' "$SRC/mirror4.ppfd" > "$WORK/mirror4off.ppfd"
+run mirror4off.ppfd
+awk -v m="$M4AVG" -v o="$(sumval 5)" 'BEGIN {
+	printf "%-28s mirror=%.6g  off=%.6g -> %s (mirror must add light)\n", \
+		"speccan-z: mirror adds PPFD", m, o, (m > o) ? "OK" : "NG";
+	exit (m > o) ? 0 : 1
+}' || status=1
+# 散乱の還流だけは鏡像経路ぶんの層への預け入れが要るので、まだ弾かれる
+sed 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/mirror4.ppfd" > "$WORK/mirror4ls.ppfd"
+if (cd "$WORK" && "$OPPFD" mirror4ls.ppfd > /dev/null 2>&1); then
+	echo "speccan-z: +leafscatter rejected -> NG (accepted invalid combo)" >&2
 	status=1
 else
-	echo "speccan: z-mirror rejected -> OK"
+	echo "speccan-z: +leafscatter rejected -> OK"
 fi
 
 echo

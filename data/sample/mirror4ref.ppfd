@@ -1,0 +1,35 @@
+# 検証 (n) の参照解 : mirror4.ppfd の鏡面天井を「z 方向に 2 倍にした幾何」で
+# 置き換えたもの。鏡面のコードを一切通らない (= 折り返しのコードも通らない。
+# 参照側の経路はすべて箱の内側にあるので canopy_path は従来の直線評価)。
+#
+# 実チャンバ側 (z = 0..1) の座標は mirror4.ppfd とそのまま同じ。
+# z = 2 の面は床の鏡像なので同じ拡散材を置く。群落は自分の鏡像と合体して
+# z = 0.5..1.5 の 1 枚になり、葉面積密度を保つため LAI は 2 倍にする
+# (a = LAI / (ztop - zbot) = 2.0 で mirror4.ppfd と一致)。
+
+OpenPPFD 1 0
+title = folded-geometry reference for mirror4 (no specular code path)
+
+wavelength = 380 780 5
+chamber    = 1.0 1.0 2.0
+patchdiv   = 6 6
+
+material = black gray 0.0
+material = white gray 0.6
+material = leaf  gray 0.1 0.1
+
+wall = all  black
+wall = zmin white
+wall = zmax white
+
+canopy = 1.5 0.5 2.0 0.5 leaf
+
+spectrum = na555 mono 555
+
+led = 0.5 0.5 0.75 1.0 na555 iso
+led = 0.5 0.5 1.25 1.0 na555 iso
+
+target      = base 0.05 12 6 0 1 0 1
+photoperiod = 16
+
+end
