@@ -135,7 +135,20 @@ typedef struct {
 	int     ndivu, ndivv;           /* 1 面あたりの分割数 (0 = patchdiv に従う) */
 } occluder_t;
 
-/* ---- 群落 (Beer-Lambert 減衰スラブ + 衝突源二流散乱) ---------------- */
+/* ---- 群落スラブ 1 枚 (多段ラックでは段ごとに 1 枚置ける) ------------ */
+typedef struct {
+	double  ztop, zbot;             /* ztop > zbot */
+	double  lai;                    /* 葉面積指数 [-] */
+	double  k0;                     /* 葉群投影係数 G */
+	double  a;                      /* 葉面積密度 = lai / (ztop - zbot) [1/m] */
+	double  w;                      /* 先頭スラブ基準の減衰重み = (k0 a) / (k0_0 a_0)。
+	                                   先頭は厳密に 1.0 なので 1 枚だけの入力は
+	                                   従来と 1 ビットも変わらない */
+} cslab_t;
+
+/* ---- 群落 (Beer-Lambert 減衰スラブ + 衝突源二流散乱) ----------------
+先頭スラブ (slab[0]) の諸元をそのまま持つ。散乱モデル (scatter) は
+1 枚のときだけ有効なので、その場合これが唯一のスラブになる。 */
 typedef struct {
 	int     on;
 	double  ztop, zbot;             /* ztop > zbot */
@@ -163,7 +176,7 @@ typedef struct {
 	int       ndivu, ndivv;         /* 1 面あたりの分割数 */
 
 	/* 入力テーブル */
-	int       nmat, nspec, nemit, ntarget, nband, ndist, nocc;
+	int       nmat, nspec, nemit, ntarget, nband, ndist, nocc, nslab;
 	pmat_t   *mat;
 	spec_t   *spec;
 	emitter_t *emit;
@@ -171,6 +184,7 @@ typedef struct {
 	band_t   *band;
 	photdist_t *dist;
 	occluder_t *occ;
+	cslab_t   *slab;                /* [nslab] 群落スラブ (z の昇順、重なりなし) */
 	canopy_t  canopy;
 
 	/* 解析条件 */

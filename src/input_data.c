@@ -483,7 +483,7 @@ int input_data(FILE *fp, ppfd_t *p)
 	char   strline[BUFSIZ], strsave[BUFSIZ];
 	char  *token[MAXTOKEN];
 	const char sep[] = " \t";
-	int    cmat = 0, cspec = 0, cemit = 0, ctarget = 0, cband = 0, cocc = 0;
+	int    cmat = 0, cspec = 0, cemit = 0, ctarget = 0, cband = 0, cocc = 0, cslab = 0;
 	int    i;
 	double *ax_lam = NULL, *ax_v = NULL, *ax_v2 = NULL;
 	int    nax = 0;
@@ -787,27 +787,52 @@ int input_data(FILE *fp, ppfd_t *p)
 			p->occ[p->nocc++] = o;
 		}
 		else if (!strcmp(token[0], "canopy")) {
-			int im;
-			/* canopy = ztop zbot LAI G leafmaterial */
+			int    im;
+			cslab_t sl;
+			/* canopy = ztop zbot LAI G leafmaterial (複数行で多段ラックの各段) */
 			if (ntok < 7) { fprintf(stderr, "*** invalid canopy data\n"); ierr = 1; continue; }
-			p->canopy.ztop = atof(token[2]);
-			p->canopy.zbot = atof(token[3]);
-			p->canopy.lai  = atof(token[4]);
-			p->canopy.k0   = atof(token[5]);
+			memset(&sl, 0, sizeof(sl));
+			sl.ztop = atof(token[2]);
+			sl.zbot = atof(token[3]);
+			sl.lai  = atof(token[4]);
+			sl.k0   = atof(token[5]);
 			im = find_mat(p, token[6]);
 			if (im < 0) {
 				fprintf(stderr, "*** unknown material : %s\n", token[6]);
 				ierr = 1;
 				continue;
 			}
-			p->canopy.imat = im;
-			if (p->canopy.ztop <= p->canopy.zbot) {
+			if (sl.ztop <= sl.zbot) {
 				fprintf(stderr, "*** invalid canopy data (ztop <= zbot)\n");
 				ierr = 1;
 				continue;
 			}
-			p->canopy.a = p->canopy.lai / (p->canopy.ztop - p->canopy.zbot);
-			p->canopy.on = 1;
+			/*
+			葉材料は全スラブで共通にする。減衰は
+			exp(-Σ_j G_j a_j √(1-ω_j) s_j) なので、材料 (= ω) が段ごとに
+			違うと波長ごとの重みが段ごとに変わり、経路長を 1 個の
+			スカラにまとめられなくなる (同じ作物を段ごとに育てるのが
+			多段ラックなので、変わるのは LAI と高さ)。
+			*/
+			if ((p->nslab > 0) && (im != p->canopy.imat)) {
+				fprintf(stderr, "*** all canopy slabs must share one leaf material "
+					"(\"%s\" != \"%s\")\n", p->mat[im].name, p->mat[p->canopy.imat].name);
+				ierr = 1;
+				continue;
+			}
+			sl.a = sl.lai / (sl.ztop - sl.zbot);
+			APPEND(p->slab, p->nslab, cslab, cslab_t);
+			p->slab[p->nslab++] = sl;
+			if (p->nslab == 1) {
+				/* 先頭スラブの諸元は canopy_t 側にも持つ (散乱モデルと出力が使う) */
+				p->canopy.ztop = sl.ztop;
+				p->canopy.zbot = sl.zbot;
+				p->canopy.lai  = sl.lai;
+				p->canopy.k0   = sl.k0;
+				p->canopy.a    = sl.a;
+				p->canopy.imat = im;
+				p->canopy.on   = 1;
+			}
 		}
 		else if (!strcmp(token[0], "band")) {
 			band_t b;
@@ -876,6 +901,64 @@ int input_data(FILE *fp, ppfd_t *p)
 	if (p->ntarget == 0) {
 		fprintf(stderr, "*** no target plane (target)\n");
 		return 1;
+	}
+
+	/* ---- 群落スラブ : z の降順に並べ、重なりを弾き、減衰重みを決める ---- */
+	if (p->nslab > 0) {
+		int j, k;
+		/* 枚数は多くないので単純な選択ソート (ztop の降順 = 上の段から) */
+		for (j = 0; j < p->nslab - 1; j++) {
+			int best = j;
+			for (k = j + 1; k < p->nslab; k++) {
+				if (p->slab[k].ztop > p->slab[best].ztop) best = k;
+			}
+			if (best != j) {
+				const cslab_t t = p->slab[j];
+				p->slab[j] = p->slab[best];
+				p->slab[best] = t;
+			}
+		}
+		for (j = 1; j < p->nslab; j++) {
+			/* 重なると同じ葉を二重に数えるので弾く (接するのは可) */
+			if (p->slab[j].ztop > p->slab[j - 1].zbot) {
+				fprintf(stderr, "*** canopy slabs overlap : z = %g..%g and %g..%g\n",
+					p->slab[j].zbot, p->slab[j].ztop,
+					p->slab[j - 1].zbot, p->slab[j - 1].ztop);
+				return 1;
+			}
+		}
+		/*
+		減衰重み。消散係数は基準スラブの k = G_r a_r √(1-ω) のままにして、
+		段ごとの違いを経路長の側へ寄せる (w_r は厳密に 1.0 なので、スラブが
+		1 枚だけの入力は従来と 1 ビットも変わらない)。基準は G a > 0 の
+		最初のスラブ (葉の無い段を先頭に書いても 0 除算にならないように)。
+		*/
+		{
+			int    iref = 0;
+			double ref;
+			for (j = 0; j < p->nslab; j++) {
+				if ((p->slab[j].k0 * p->slab[j].a) > 0.0) { iref = j; break; }
+			}
+			ref = p->slab[iref].k0 * p->slab[iref].a;
+			p->canopy.ztop = p->slab[iref].ztop;
+			p->canopy.zbot = p->slab[iref].zbot;
+			p->canopy.lai  = p->slab[iref].lai;
+			p->canopy.k0   = p->slab[iref].k0;
+			p->canopy.a    = p->slab[iref].a;
+			for (j = 0; j < p->nslab; j++) {
+				/* ref = 0 は全段が葉ゼロ (kext も 0 なので重みは効かない) */
+				p->slab[j].w = (j == iref) ? 1.0 :
+					((ref > 0.0) ? ((p->slab[j].k0 * p->slab[j].a) / ref) : 1.0);
+			}
+		}
+		if (p->canopy.scatter && (p->nslab > 1)) {
+			fprintf(stderr, "*** leafscatter supports a single canopy slab only "
+				"(%d given)\n", p->nslab);
+			fprintf(stderr, "    (the two-stream field is one vertical column; "
+				"several columns would have to\n");
+			fprintf(stderr, "     exchange with each other through the cavity)\n");
+			return 1;
+		}
 	}
 
 	/*

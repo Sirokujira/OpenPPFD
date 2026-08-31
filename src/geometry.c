@@ -259,27 +259,32 @@ fold の逆像は周期 P ごとに現れる 2 本の区間の和 :
 
 zbot = 0 や ztop = Lz でも 2 本が接するだけなので二重計上にならない。
 */
-static double fold_measure(const ppfd_t *p, double zlo, double zhi)
+static double fold_measure(const ppfd_t *p, const cslab_t *c, double zlo, double zhi)
 {
-	const canopy_t *cp = &p->canopy;
 	const double period = 2.0 * p->Lz;
 	double sum = 0.0;
 	int    k, k0, k1;
 
-	if (period <= 0.0) return overlap1d(zlo, zhi, cp->zbot, cp->ztop);
+	if (period <= 0.0) return overlap1d(zlo, zhi, c->zbot, c->ztop);
 
-	k0 = (int)floor((zlo - cp->ztop) / period);
-	k1 = (int)ceil((zhi + cp->ztop) / period);
+	k0 = (int)floor((zlo - c->ztop) / period);
+	k1 = (int)ceil((zhi + c->ztop) / period);
 	for (k = k0; k <= k1; k++) {
 		const double o = (double)k * period;
-		sum += overlap1d(zlo, zhi, cp->zbot + o, cp->ztop + o);
-		sum += overlap1d(zlo, zhi, o - cp->ztop, o - cp->zbot);
+		sum += overlap1d(zlo, zhi, c->zbot + o, c->ztop + o);
+		sum += overlap1d(zlo, zhi, o - c->ztop, o - c->zbot);
 	}
 	return sum;
 }
 
 /*
-線分 a-b のうち群落スラブ内にある部分の長さ [m]。
+線分 a-b の群落内の経路長 [m]。
+
+スラブが複数あるときは「先頭スラブ基準に規格化した等価経路長」
+Σ_j w_j s_j (w_j = G_j a_j / (G_0 a_0)) を返す。消散係数 canopy_kext は
+先頭スラブの k = G_0 a_0 √(1-ω) のままなので、その積は段ごとの諸元を
+そのまま反映した Σ_j G_j a_j √(1-ω) s_j になる。w_0 は厳密に 1.0 なので
+スラブが 1 枚だけの入力は従来と 1 ビットも変わらない。
 
 床・天井が鏡面のとき、端点が箱の外にある線分は鏡像への直線なので
 折り返した実経路で測る。鏡映は弧長を保つので「直線の z がスラブの逆像に
@@ -287,7 +292,6 @@ static double fold_measure(const ppfd_t *p, double zlo, double zhi)
 */
 double canopy_path(const ppfd_t *p, vec3_t a, vec3_t b)
 {
-	const canopy_t *cp = &p->canopy;
 	const vec3_t d = v_sub(b, a);
 	const double len = v_norm(d);
 	/*
@@ -299,31 +303,39 @@ double canopy_path(const ppfd_t *p, vec3_t a, vec3_t b)
 	                 (p->mat[p->wallmat[5]].rhos > 0.0);
 	const int fold = zmir && !((a.z >= 0.0) && (a.z <= p->Lz) &&
 	                           (b.z >= 0.0) && (b.z <= p->Lz));
-	double t0, t1, lo, hi;
+	const int horiz = (fabs(d.z) < (EPS * (len + 1.0)));
+	const double zfold = (fold && horiz) ? fold_z(p, a.z) : a.z;
+	const double zlo = (a.z < b.z) ? a.z : b.z;
+	const double zhi = (a.z < b.z) ? b.z : a.z;
+	double sum = 0.0;
+	int    j;
 
-	if (!cp->on || (len < EPS)) return 0.0;
+	if (!p->canopy.on || (len < EPS)) return 0.0;
 
-	if (fabs(d.z) < (EPS * (len + 1.0))) {
-		/* ほぼ水平な線分 : 全体がスラブ内かどうか */
-		const double z = fold ? fold_z(p, a.z) : a.z;
-		return ((z >= cp->zbot) && (z <= cp->ztop)) ? len : 0.0;
+	for (j = 0; j < p->nslab; j++) {
+		const cslab_t *c = &p->slab[j];
+		double t0, t1, lo, hi;
+
+		if (horiz) {
+			/* ほぼ水平な線分 : 全体がスラブ内かどうか */
+			if ((zfold >= c->zbot) && (zfold <= c->ztop)) sum += c->w * len;
+			continue;
+		}
+		if (fold) {
+			sum += c->w * ((fold_measure(p, c, zlo, zhi) / fabs(d.z)) * len);
+			continue;
+		}
+
+		t0 = (c->zbot - a.z) / d.z;
+		t1 = (c->ztop - a.z) / d.z;
+		lo = (t0 < t1) ? t0 : t1;
+		hi = (t0 < t1) ? t1 : t0;
+		if (lo < 0.0) lo = 0.0;
+		if (hi > 1.0) hi = 1.0;
+		if (hi <= lo) continue;
+		sum += c->w * ((hi - lo) * len);
 	}
-
-	if (fold) {
-		const double zlo = (a.z < b.z) ? a.z : b.z;
-		const double zhi = (a.z < b.z) ? b.z : a.z;
-		return (fold_measure(p, zlo, zhi) / fabs(d.z)) * len;
-	}
-
-	t0 = (cp->zbot - a.z) / d.z;
-	t1 = (cp->ztop - a.z) / d.z;
-	lo = (t0 < t1) ? t0 : t1;
-	hi = (t0 < t1) ? t1 : t0;
-	if (lo < 0.0) lo = 0.0;
-	if (hi > 1.0) hi = 1.0;
-	if (hi <= lo) return 0.0;
-
-	return (hi - lo) * len;
+	return sum;
 }
 
 /* 経路長 s [m] に対する群落の分光透過率 tr[0..nlam-1] */

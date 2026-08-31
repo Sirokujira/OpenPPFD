@@ -84,10 +84,10 @@ void output_log(ppfd_t *p)
 		plog(p, "occluder     : %-10s x %g..%g, y %g..%g, z %g..%g m, %s\n",
 			o->name, o->x0, o->x1, o->y0, o->y1, o->z0, o->z1, p->mat[o->imat].name);
 	}
-	if (p->canopy.on) {
+	for (ie = 0; ie < p->nslab; ie++) {
+		const cslab_t *c = &p->slab[ie];
 		plog(p, "canopy       : z = %g..%g m, LAI = %g, G = %g, leaf = %s\n",
-			p->canopy.zbot, p->canopy.ztop, p->canopy.lai, p->canopy.k0,
-			p->mat[p->canopy.imat].name);
+			c->zbot, c->ztop, c->lai, c->k0, p->mat[p->canopy.imat].name);
 	}
 	for (ie = 0; ie < p->ndist; ie++) {
 		const photdist_t *d = &p->dist[ie];
