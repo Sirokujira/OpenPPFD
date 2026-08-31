@@ -78,12 +78,22 @@ typedef struct {
 	double  watt;                   /* ファイル記載の消費電力 [W] (参考値) */
 } photdist_t;
 
-/* ---- 鏡面反射の変換列 (鏡像の折り返し面の並び) ---------------------- */
+/* ---- 鏡面反射の変換 (箱型ビリヤードの展開指数) -----------------------
+軸並行の直方体では、互いに直交する面の鏡映は可換なので「折り返した面の
+並び」で鏡像を数えると同じ像を何度も数えてしまう (xmax→zmax と
+zmax→xmax は同じ点)。鏡映群は軸ごとの無限二面体群の直積なので、鏡像は
+軸ごとの展開指数 n[3] だけで一意に決まる :
+
+    n = 0 : 折り返さない
+    n > 0 : max 面から交互に n 回 (xmax, xmin, xmax, ...)
+    n < 0 : min 面から交互に |n| 回
+
+座標は n が偶数なら c + n L、奇数なら (n+1) L - c へ写る。 */
 #define MAXSPECT 512                /* 変換数の上限 (超えたらログに出して打ち切る) */
 typedef struct {
-	int     nmir;                   /* 折り返し回数 (1..specbounce) */
-	int     face[6];                /* face[0] = 放射側に最も近い折り返し面 */
-	double  w;                      /* 重み = Π ρs */
+	int     n[3];                   /* 軸ごとの展開指数 */
+	int     nmir;                   /* 折り返し回数 = |n0| + |n1| + |n2| */
+	double  w;                      /* 重み = 交差する面の Π ρs */
 } strans_t;
 
 /* ---- 光源 --------------------------------------------------------- */
@@ -316,6 +326,7 @@ void    setup_images(ppfd_t *);
 int     spec_transforms(const ppfd_t *, strans_t *, int);
 vec3_t  spec_apply(const ppfd_t *, const strans_t *, vec3_t);
 vec3_t  spec_apply_dir(const strans_t *, vec3_t);
+int     spec_on_mirror(const ppfd_t *, const strans_t *, const patch_t *);
 void    direct_point(const ppfd_t *, vec3_t, vec3_t, double *);
 void    direct_point_ex(const ppfd_t *, vec3_t, vec3_t, double *, double *, double *);
 

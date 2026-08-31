@@ -111,7 +111,7 @@ static void gather_target(ppfd_t *p)
 					vec3_t q4[4], nj;
 					double f, s;
 					int    v;
-					if (q->iface == str[i2].face[0]) continue;
+					if (spec_on_mirror(p, &str[i2], q)) continue;
 					for (v = 0; v < 4; v++) q4[v] = spec_apply(p, &str[i2], q->p[v]);
 					nj = spec_apply_dir(&str[i2], q->n);
 					if (v_dot(nj, v_sub(x, q4[0])) <= 0.0) continue;

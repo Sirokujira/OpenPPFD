@@ -1,0 +1,57 @@
+# 検証 (p) 鏡面が 2 面あるとき (直交する鏡映の可換性)
+#
+# 側壁 x = 1 と天井 z = 1 を完全鏡面 (rho_s = 1.0)、y = 0 の壁を拡散
+# (rho_d = 0.6)、残りを黒にする。
+#
+# ■ なぜ「折り返した面の並び」で数えてはいけないか
+# 軸並行の直方体では、互いに直交する面の鏡映は可換 :
+#     M_zmax(M_xmax(S)) = M_xmax(M_zmax(S))
+# なので「xmax → zmax」と「zmax → xmax」は同じ鏡像を指す。面の並びで
+# 鏡像を列挙すると、この角の鏡像を 2 回数えてしまう (実測 +3.7%)。
+# 鏡映群は軸ごとの無限二面体群の直積なので、鏡像は軸ごとの展開指数
+# n[3] だけで一意に決まる。この数え方なら二重計上は原理的に起きない。
+#
+# ■ 直接光の解析解 (壁を黒くした変種で判定)
+# specbounce = 2 なので鏡像は 3 個 (x のみ / z のみ / 角) : 反対側の面
+# (xmin, zmin) は黒なので 2 段目でそちらへ折り返す経路は消える。
+# 光源 (0.5, 0.5, 0.5) の鏡像は (1.5,0.5,0.5), (0.5,0.5,1.5), (1.5,0.5,1.5)。
+# 測定面 (0.5, 0.5, 0.1) の上向きセンサは 4 本すべてを見るので
+#
+#   E = Phi/(4 pi) * Σ cos(theta_i)/d_i^2 = 0.5853133 W/m^2
+#   PPFD = E * 4.6394372 = 2.7155297 umol/m2/s               (厳密)
+#
+# 打ち切り放射束も厳密に 0 になる (3 段目は必ず黒い面を通る)。
+#
+# ■ 二重箱等価 (mirror5ref.ppfd と比較)
+# 完全鏡面の 2 面は「x と z の両方で 2 倍にした幾何」と厳密に等価 :
+#   - チャンバを 2 x 1 x 2、拡散面 y = 0 の分割も両方向に 2 倍 (12 12)
+#   - 鏡映面 (x = 1, z = 1) には壁が無い。x = 2 は xmin の、z = 2 は
+#     zmin の鏡像なのでどちらも黒のまま
+#   - 光源の鏡像 3 個を実光源として置く
+# 直接光・拡張形態係数 (角の変換を含む) がすべて 1 対 1 に対応する。
+
+OpenPPFD 1 0
+title = two specular faces (commuting mirrors)
+
+wavelength = 380 780 5
+chamber    = 1.0 1.0 1.0
+patchdiv   = 6 6
+
+material = black  gray 0.0
+material = white  gray 0.6
+material = mirror gray 0.0 specular 1.0
+
+wall = all  black
+wall = ymin white
+wall = xmax mirror
+wall = zmax mirror
+
+spectrum = na555 mono 555
+
+led = 0.5 0.5 0.5 1.0 na555 iso
+
+target      = s 0.1 12 6
+photoperiod = 16
+specbounce  = 2
+
+end

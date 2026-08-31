@@ -45,183 +45,178 @@ rho_s * Phi を持ち、その直線が折り返し経路をそのまま表す�
 壁の吸収は (1 - rho_diffuse - rho_specular) * Einc になる。鏡面成分は
 鏡像が運ぶので、収支はこれで閉じる。
 
-【制限】鏡像からの直線は折り返した経路を表すので、群落や遮蔽物があると
-経路長も遮蔽判定も合わない。両立は入力段で明示的に弾く。
+鏡像は「折り返した面の並び」ではなく軸ごとの展開指数で数える。直交する
+面の鏡映は可換なので、並びで数えると同じ像を何度も数えてしまう
+(xmax→zmax と zmax→xmax は同じ点)。
+
+【制限】鏡像からの直線は折り返した経路を表すので、遮蔽物があると遮蔽
+判定が合わない。両立は入力段で明示的に弾く (群落の経路長は canopy_path
+が折り返して測るので併用できる)。
 */
 
-/* 面 f (0:xmin 1:xmax 2:ymin 3:ymax 4:zmin 5:zmax) の平面座標と軸 */
-static void face_plane(const ppfd_t *p, int f, int *axis, double *val)
+/* 軸 a の展開指数 n に対応する重み (交差する面の Π ρs)。0 なら経路なし */
+static double axis_weight(const double *rs, int a, int n)
 {
-	*axis = f / 2;
-	switch (f) {
-	case 0: *val = 0.0;    break;
-	case 1: *val = p->Lx;  break;
-	case 2: *val = 0.0;    break;
-	case 3: *val = p->Ly;  break;
-	case 4: *val = 0.0;    break;
-	default: *val = p->Lz; break;
+	const int fmin = 2 * a, fmax = (2 * a) + 1;
+	const int m = (n < 0) ? -n : n;
+	double w = 1.0;
+	int    j;
+
+	/* n > 0 は max 面から、n < 0 は min 面から交互に折り返す */
+	for (j = 1; j <= m; j++) {
+		const int odd = (j % 2) != 0;
+		w *= rs[(n > 0) ? (odd ? fmax : fmin) : (odd ? fmin : fmax)];
+		if (w <= 0.0) return 0.0;
 	}
+	return w;
 }
 
-/* 軸 axis の座標 val の平面で点を鏡映する */
-static vec3_t mirror_point(vec3_t a, int axis, double val)
+/* 展開指数 n における軸 a の座標写像 (箱の長さ L) */
+static double axis_map(double c, double L, int n)
 {
-	if (axis == 0) a.x = (2.0 * val) - a.x;
-	else if (axis == 1) a.y = (2.0 * val) - a.y;
-	else a.z = (2.0 * val) - a.z;
+	/* C の % は負数で符号が残るので、奇数判定はそのまま使える */
+	return ((n % 2) == 0) ? (c + ((double)n * L)) : (((double)(n + 1) * L) - c);
+}
+
+/*
+鏡面反射の変換を列挙する。
+
+軸ごとの展開指数 (n0, n1, n2) を |n0|+|n1|+|n2| = 1..maxord の範囲で
+すべて回す。直交する鏡映が可換なせいで起きる二重計上は、この数え方
+では原理的に起こらない (1 つの鏡像 = 1 つの (n0,n1,n2))。
+戻り値 = 変換の数 (maxn で打ち切り)。
+*/
+static int enum_transforms(const ppfd_t *p, strans_t *tr, int maxn, int maxord)
+{
+	double rs[6];
+	int    f, n0, n1, n2, n = 0;
+
+	for (f = 0; f < 6; f++) rs[f] = p->mat[p->wallmat[f]].rhos;
+	if (maxord < 1) return 0;
+
+	for (n0 = -maxord; n0 <= maxord; n0++) {
+		const double w0 = axis_weight(rs, 0, n0);
+		const int    m0 = (n0 < 0) ? -n0 : n0;
+		if (w0 <= 0.0) continue;
+		for (n1 = -(maxord - m0); n1 <= (maxord - m0); n1++) {
+			const double w1 = w0 * axis_weight(rs, 1, n1);
+			const int    m1 = m0 + ((n1 < 0) ? -n1 : n1);
+			if (w1 <= 0.0) continue;
+			for (n2 = -(maxord - m1); n2 <= (maxord - m1); n2++) {
+				const double w2 = w1 * axis_weight(rs, 2, n2);
+				const int    m2 = m1 + ((n2 < 0) ? -n2 : n2);
+				if ((m2 < 1) || (w2 <= 0.0)) continue;
+				if (n >= maxn) return n;
+				tr[n].n[0] = n0;
+				tr[n].n[1] = n1;
+				tr[n].n[2] = n2;
+				tr[n].nmir = m2;
+				tr[n].w = w2;
+				n++;
+			}
+		}
+	}
+	return n;
+}
+
+/* 拡散光の輸送用 : specbounce 段までの変換 (setup_images と同一の数え方) */
+int spec_transforms(const ppfd_t *p, strans_t *tr, int maxn)
+{
+	return enum_transforms(p, tr, maxn, p->specbounce);
+}
+
+/* 変換を点に適用する */
+vec3_t spec_apply(const ppfd_t *p, const strans_t *t, vec3_t a)
+{
+	a.x = axis_map(a.x, p->Lx, t->n[0]);
+	a.y = axis_map(a.y, p->Ly, t->n[1]);
+	a.z = axis_map(a.z, p->Lz, t->n[2]);
 	return a;
 }
 
-/* 方向ベクトルの鏡映 (平面の位置によらず軸成分の符号反転) */
-static vec3_t mirror_dir(vec3_t a, int axis)
+/* 変換を方向ベクトルに適用する (折り返し回数が奇数の軸だけ符号反転) */
+vec3_t spec_apply_dir(const strans_t *t, vec3_t a)
 {
-	if (axis == 0) a.x = -a.x;
-	else if (axis == 1) a.y = -a.y;
-	else a.z = -a.z;
+	if ((t->n[0] % 2) != 0) a.x = -a.x;
+	if ((t->n[1] % 2) != 0) a.y = -a.y;
+	if ((t->n[2] % 2) != 0) a.z = -a.z;
 	return a;
+}
+
+/*
+パッチ q が変換 t の折り返し面の上に載っているか。
+
+載っていると鏡像がパッチ自身と同じ平面に来て経路が退化する (自分が
+置かれている鏡で自分を折り返すことになる) ので、拡張形態係数の計算から
+落とす。「その軸で折り返していて (n != 0)、かつ座標が動かない」が条件。
+*/
+int spec_on_mirror(const ppfd_t *p, const strans_t *t, const patch_t *q)
+{
+	int    a;
+	double L, c;
+
+	if (q->iface >= 6) return 0;            /* 遮蔽物の面 (鏡面とは併用しない) */
+	a = q->iface / 2;
+	if (t->n[a] == 0) return 0;
+	L = (a == 0) ? p->Lx : ((a == 1) ? p->Ly : p->Lz);
+	c = (a == 0) ? q->p[0].x : ((a == 1) ? q->p[0].y : q->p[0].z);
+	return (axis_map(c, L, t->n[a]) == c);
 }
 
 /*
 鏡像光源を p->emit の末尾に追加する。p->nemit は実光源のみを数えたまま
 にはできないので、実光源数を nreal に控えて全体を nemit とする。
+
+打ち切り誤差 (spec_lost) は「1 段深い変換が運ぶはずだった放射束」=
+実光源の総放射束 × Σ(order = specbounce+1 の変換の重み)。鏡面が 1 面
+だけなら 2 段目以降は必ず反対側の面 (ρs = 0) を通るので厳密に 0 になる。
 */
 void setup_images(ppfd_t *p)
 {
 	const int nreal = p->nemit;
-	int    lev, f, i;
-	int    cap = p->nemit;
-	int    beg = 0, end = nreal;
-	int   *lastface = NULL;
-	double rs[6];
-	int    nspecular = 0;
+	strans_t *tr;
+	double flux_real = 0.0;
+	int    nt, it, i, f, nspecular = 0, nimg = 0;
 
 	p->nimage = 0;
 	p->spec_lost = 0.0;
 	for (f = 0; f < 6; f++) {
-		rs[f] = p->mat[p->wallmat[f]].rhos;
-		if (rs[f] > 0.0) nspecular++;
+		if (p->mat[p->wallmat[f]].rhos > 0.0) nspecular++;
 	}
 	if ((nspecular == 0) || (p->specbounce <= 0)) return;
 
-	lastface = (int *)xmalloc((size_t)(nreal + 1) * sizeof(int));
-	for (i = 0; i < nreal; i++) lastface[i] = -1;
+	for (i = 0; i < nreal; i++) flux_real += p->emit[i].flux;
 
-	for (lev = 0; lev < p->specbounce; lev++) {
-		const int b = beg, e = end;
-		for (i = b; i < e; i++) {
-			for (f = 0; f < 6; f++) {
-				emitter_t im;
-				int    axis;
-				double val;
-				if (rs[f] <= 0.0) continue;
-				if (lastface[i] == f) continue;   /* 同じ面で 2 回続けては折り返さない */
-				face_plane(p, f, &axis, &val);
-				im = p->emit[i];
-				im.flux = p->emit[i].flux * rs[f];
-				im.watt = 0.0;                    /* 消費電力は実光源のみ */
-				if (im.flux <= 0.0) continue;
-				im.pos = mirror_point(im.pos, axis, val);
-				im.dir = mirror_dir(im.dir, axis);
-				im.ax  = mirror_dir(im.ax, axis);
-				im.ay  = mirror_dir(im.ay, axis);
-				im.cx  = mirror_dir(im.cx, axis);
-				im.cy  = mirror_dir(im.cy, axis);
-				if (p->nemit >= cap) {
-					cap = cap ? (2 * cap) : 16;
-					p->emit = (emitter_t *)realloc(p->emit, (size_t)cap * sizeof(emitter_t));
-					lastface = (int *)realloc(lastface, (size_t)cap * sizeof(int));
-					if ((p->emit == NULL) || (lastface == NULL)) {
-						fprintf(stderr, "*** out of memory\n");
-						exit(1);
-					}
-				}
-				if (lev == p->specbounce - 1) {
-					/*
-					次の段は作らないので、この鏡像が生むはずだった分を数える。
-					自分が折り返した面 f へは戻らないので、それ以外の鏡面だけ。
-					鏡面が 1 面しかなければ 0 になる (打ち切り誤差なし)。
-					*/
-					int g;
-					for (g = 0; g < 6; g++) {
-						if ((g != f) && (rs[g] > 0.0)) p->spec_lost += im.flux * rs[g];
-					}
-				}
-				lastface[p->nemit] = f;
-				p->emit[p->nemit++] = im;
-				p->nimage++;
-			}
+	tr = (strans_t *)xmalloc((size_t)MAXSPECT * sizeof(strans_t));
+	nt = enum_transforms(p, tr, MAXSPECT, p->specbounce + 1);
+
+	/* 鏡像の総数はあらかじめ分かるので 1 回で確保する */
+	for (it = 0; it < nt; it++) {
+		if (tr[it].nmir <= p->specbounce) nimg += nreal;
+	}
+	p->emit = (emitter_t *)realloc(p->emit, (size_t)(nreal + nimg) * sizeof(emitter_t));
+	if (p->emit == NULL) { fprintf(stderr, "*** out of memory\n"); exit(1); }
+
+	for (it = 0; it < nt; it++) {
+		if (tr[it].nmir > p->specbounce) {
+			p->spec_lost += flux_real * tr[it].w;
+			continue;
 		}
-		beg = e;
-		end = p->nemit;
-		if (beg >= end) break;
-	}
-	free(lastface);
-}
-
-/*
-鏡面反射の変換列を列挙する (拡散光の輸送用)。
-
-face[0] が放射側に最も近い折り返し、face[nmir-1] が受光側に最も近い
-折り返し。同じ面で 2 回続けては折り返さない (恒等になる)。列挙の規則は
-setup_images の鏡像光源と同一なので、直接光と拡散光で経路の数え方が
-食い違わない。戻り値 = 変換の数 (maxn で打ち切り)。
-*/
-int spec_transforms(const ppfd_t *p, strans_t *tr, int maxn)
-{
-	double rs[6];
-	int    f, lev, k, n = 0, beg, end;
-
-	for (f = 0; f < 6; f++) rs[f] = p->mat[p->wallmat[f]].rhos;
-
-	for (f = 0; f < 6; f++) {
-		if ((rs[f] <= 0.0) || (n >= maxn)) continue;
-		tr[n].nmir = 1;
-		tr[n].face[0] = f;
-		tr[n].w = rs[f];
-		n++;
-	}
-	beg = 0;
-	end = n;
-	for (lev = 2; lev <= p->specbounce; lev++) {
-		for (k = beg; k < end; k++) {
-			const int last = tr[k].face[tr[k].nmir - 1];
-			for (f = 0; f < 6; f++) {
-				if ((rs[f] <= 0.0) || (f == last) || (n >= maxn)) continue;
-				tr[n] = tr[k];
-				tr[n].face[tr[n].nmir] = f;
-				tr[n].nmir++;
-				tr[n].w *= rs[f];
-				n++;
-			}
+		for (i = 0; i < nreal; i++) {
+			emitter_t im = p->emit[i];
+			im.flux = p->emit[i].flux * tr[it].w;
+			im.watt = 0.0;                    /* 消費電力は実光源のみ */
+			im.pos = spec_apply(p, &tr[it], im.pos);
+			im.dir = spec_apply_dir(&tr[it], im.dir);
+			im.ax  = spec_apply_dir(&tr[it], im.ax);
+			im.ay  = spec_apply_dir(&tr[it], im.ay);
+			im.cx  = spec_apply_dir(&tr[it], im.cx);
+			im.cy  = spec_apply_dir(&tr[it], im.cy);
+			p->emit[p->nemit++] = im;
+			p->nimage++;
 		}
-		beg = end;
-		end = n;
 	}
-	return n;
-}
-
-/* 変換列を点に適用する (face[0] から順に鏡映) */
-vec3_t spec_apply(const ppfd_t *p, const strans_t *t, vec3_t a)
-{
-	int    k, axis;
-	double val;
-
-	for (k = 0; k < t->nmir; k++) {
-		face_plane(p, t->face[k], &axis, &val);
-		a = mirror_point(a, axis, val);
-	}
-	return a;
-}
-
-/* 変換列を方向ベクトルに適用する */
-vec3_t spec_apply_dir(const strans_t *t, vec3_t a)
-{
-	int k;
-
-	for (k = 0; k < t->nmir; k++) {
-		a = mirror_dir(a, t->face[k] / 2);
-	}
-	return a;
+	free(tr);
 }
 
 /*
