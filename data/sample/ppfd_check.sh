@@ -60,6 +60,12 @@ cell() {
 	awk -F, -v ix="$2" -v iy="$3" -v c="$4" 'NR > 1 && $1 == ix && $2 == iy {print $c; exit}' "$WORK/$1"
 }
 
+# trunc : 鏡像の打ち切りで捨てた放射束 [W]。
+# logval では使えない ("specular ff :" の行が先に当たり、その行に = が無い)。
+trunc() {
+	awk -F'truncated flux =' 'NF > 1 {split($2, f, " "); print f[1]; exit}' "$WORK/ppfd.log"
+}
+
 # sumval <列番号> : ppfd_summary.csv の 1 行目 (最初の target)
 sumval() {
 	awk -F, -v c="$1" 'NR == 2 {print $c; exit}' "$WORK/ppfd_summary.csv"
@@ -305,7 +311,7 @@ run mirror.ppfd
 EM=$(awk -v k="$KPH555" 'BEGIN {pi = 4 * atan2(1, 1); printf "%.9g", (1 / (4 * pi)) * ((1 / 0.25) + 0.8) * k}')
 chk "mirror: direct + image"    "$(cell ppfd_map_mid.csv 10 10 5)" "$EM" 2e-3
 # 鏡面が 1 面なら鏡像は自分自身の面で折り返さないので打ち切り誤差が無い
-chkabs "mirror: no truncation"  "$(awk '/^specular  / {print $9}' "$WORK/ppfd.log")" 0
+chkabs "mirror: no truncation"  "$(trunc)" 0
 # 鏡面成分は鏡像が運ぶので、壁が吸収するのは (1 - rho_d - rho_s)。収支は閉じる
 chkabs "mirror: closure"        "$(logval 'closure error')" 1e-6
 chk "mirror: walls take all"    "$(logval 'absorbed by walls')" 1.0 1e-6
@@ -323,7 +329,7 @@ echo "== (l) specular + diffuse interreflection (extended form factors) =="
 run mirror2.ppfd
 cp "$WORK/ppfd_map_mid.csv" "$WORK/map_spec.csv"
 chkabs "specdiff: closure (rho_s=1)" "$(logval 'closure error')" 1e-5
-chkabs "specdiff: no truncation"     "$(awk '/^specular  / {print $9}' "$WORK/ppfd.log")" 0
+chkabs "specdiff: no truncation"     "$(trunc)" 0
 # 二重箱等価 : 完全鏡面の折り返し = 鏡映した幾何 (鏡面コードを通らない参照解)
 run mirror2ref.ppfd
 chkabs "specdiff: folded equivalence" "$(maxdiff map_spec.csv ppfd_map_mid.csv)" 1e-6
@@ -410,6 +416,84 @@ if (cd "$WORK" && "$OPPFD" mirror4ls.ppfd > /dev/null 2>&1); then
 else
 	echo "speccan-z: +leafscatter rejected -> OK"
 fi
+
+echo
+echo "== (o) stacked canopy slabs (multi-tier racks) =="
+# canopy 行を複数書くと段ごとに群落を置ける。減衰は段ごとの寄与の和
+#   tau = Σ_j G_j a_j s_j
+# になり、鉛直光線 (s_j = 各段の厚み) では Σ_j G_j LAI_j に一致する。
+grep -v '^canopy' "$SRC/canopy2.ppfd" > "$WORK/canopy2_none.ppfd"
+run canopy2_none.ppfd
+C0=$(cell ppfd_map_below.csv 10 10 5)
+C1=$(cell ppfd_map_below.csv 15 10 5)
+run canopy2.ppfd
+# 中心セル : tau = 0.5*1.5 + 1.0*0.8 = 1.55
+chk "stacked: vertical transmit" \
+	"$(awk -v a="$(cell ppfd_map_below.csv 10 10 5)" -v b="$C0" 'BEGIN {printf "%.9g", a / b}')" \
+	"$(awk 'BEGIN {printf "%.9g", exp(-1.55)}')" 1e-3
+# 斜めセル : どちらの段も経路長が 1/cos(theta) 倍になる
+chk "stacked: oblique transmit" \
+	"$(awk -v a="$(cell ppfd_map_below.csv 15 10 5)" -v b="$C1" 'BEGIN {printf "%.9g", a / b}')" \
+	"$(awk 'BEGIN {h = 0.8; r = 15.5 / 21 - 0.5; printf "%.9g", exp(-1.55 * sqrt(h * h + r * r) / h)}')" 1e-3
+# 1 枚のスラブを 2 枚に割っても (葉面積密度が同じなら) 結果は変わらない。
+# rack.ppfd は白壁 (rho = 0.9) + 実測相当の葉なので、直接光だけでなく
+# パッチ間の群落透過率 (plen) と相互反射を通した経路も一緒に縛れる。
+run rack.ppfd
+cp "$WORK/ppfd_map_canopybase.csv" "$WORK/map_r1.csv"
+sed 's/^canopy = 0.25 0.05 3.0 0.5 leaf/canopy = 0.25 0.15 1.5 0.5 leaf\ncanopy = 0.15 0.05 1.5 0.5 leaf/' \
+	"$SRC/rack.ppfd" > "$WORK/rack_split.ppfd"
+run rack_split.ppfd
+chkabs "stacked: split == single" "$(maxdiff map_r1.csv ppfd_map_canopybase.csv)" 1e-12
+# 重なったスラブは同じ葉を二重に数えるので入力段で弾かれる
+sed 's/^canopy = 0.5 0.3 0.8 1.0 blackleaf/canopy = 0.8 0.3 0.8 1.0 blackleaf/' \
+	"$SRC/canopy2.ppfd" > "$WORK/canopy2ov.ppfd"
+if (cd "$WORK" && "$OPPFD" canopy2ov.ppfd > /dev/null 2>&1); then
+	echo "stacked: overlap rejected -> NG (accepted overlapping slabs)" >&2
+	status=1
+else
+	echo "stacked: overlap rejected -> OK"
+fi
+# 段ごとに違う葉材料は経路長を 1 個にまとめられないので弾かれる
+sed -e 's/^material = black     gray 0.0/material = black     gray 0.0\nmaterial = greenleaf gray 0.1 0.1/' \
+    -e 's/^canopy = 0.5 0.3 0.8 1.0 blackleaf/canopy = 0.5 0.3 0.8 1.0 greenleaf/' \
+	"$SRC/canopy2.ppfd" > "$WORK/canopy2mat.ppfd"
+if (cd "$WORK" && "$OPPFD" canopy2mat.ppfd > /dev/null 2>&1); then
+	echo "stacked: mixed leaf rejected -> NG (accepted two leaf materials)" >&2
+	status=1
+else
+	echo "stacked: mixed leaf rejected -> OK"
+fi
+# 二流の散乱場は 1 本のカラムなので、複数スラブとの併用は弾かれる
+sed 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/canopy2.ppfd" > "$WORK/canopy2ls.ppfd"
+if (cd "$WORK" && "$OPPFD" canopy2ls.ppfd > /dev/null 2>&1); then
+	echo "stacked: +leafscatter rejected -> NG (accepted invalid combo)" >&2
+	status=1
+else
+	echo "stacked: +leafscatter rejected -> OK"
+fi
+
+echo
+echo "== (p) two specular faces (commuting mirrors) =="
+# 直交する面の鏡映は可換 (M_zmax M_xmax = M_xmax M_zmax) なので、折り返した
+# 面の並びで鏡像を数えると角の鏡像を 2 回数えてしまう。軸ごとの展開指数で
+# 数えるとこれが起きない。壁を黒くした変種で直接光の解析解と比べる :
+#   鏡像は 3 個 (1.5,0.5,0.5) (0.5,0.5,1.5) (1.5,0.5,1.5)
+#   E = Phi/(4 pi) Σ cos/d^2 -> PPFD = 2.7155297 umol/m2/s
+# 面の並びで数えると角が 2 回入って 2.8170250 (+3.7%) になる。
+sed -e 's/^wall = ymin white/wall = ymin black/' \
+    -e 's/^target      = s 0.1 12 6/target      = s 0.1 1 1/' \
+	"$SRC/mirror5.ppfd" > "$WORK/mirror5d.ppfd"
+run mirror5d.ppfd
+chk "twomirror: 3 images" "$(sumval 5)" 2.7155297 1e-6
+# 反対側の面が黒なので 3 段目の経路は消える = 打ち切り誤差は厳密に 0
+chkabs "twomirror: no truncation" "$(trunc)" 0
+# 鏡面成分は鏡像が運ぶので、拡散壁を戻しても収支は閉じる
+run mirror5.ppfd
+chkabs "twomirror: closure" "$(logval 'closure error')" 1e-6
+cp "$WORK/ppfd_map_s.csv" "$WORK/map_m5.csv"
+# 完全鏡面の 2 面 = x と z の両方で 2 倍にした幾何 (角の変換も 1 対 1)
+run mirror5ref.ppfd
+chkabs "twomirror: folded equivalence" "$(maxdiff map_m5.csv ppfd_map_s.csv)" 1e-6
 
 echo
 if [ "$status" -ne 0 ]; then

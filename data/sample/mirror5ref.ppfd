@@ -1,0 +1,32 @@
+# 検証 (p) の参照解 : mirror5.ppfd の鏡面 2 面を「x と z の両方で 2 倍に
+# した幾何」で置き換えたもの。鏡面のコードを一切通らない。
+#
+# 実チャンバ側 (x = 0..1, z = 0..1) の座標はそのまま。拡散面は y = 0 だけ
+# なので、その分割を両方向に 2 倍 (12 12) にすると mirror5.ppfd の
+# パッチ (1/6 x 1/6) とその鏡像に厳密に揃う。他の面は黒 = 放射しないので
+# 分割の違いは結果に影響しない。
+
+OpenPPFD 1 0
+title = folded-geometry reference for mirror5 (no specular code path)
+
+wavelength = 380 780 5
+chamber    = 2.0 1.0 2.0
+patchdiv   = 12 12
+
+material = black gray 0.0
+material = white gray 0.6
+
+wall = all  black
+wall = ymin white
+
+spectrum = na555 mono 555
+
+led = 0.5 0.5 0.5 1.0 na555 iso
+led = 1.5 0.5 0.5 1.0 na555 iso
+led = 0.5 0.5 1.5 1.0 na555 iso
+led = 1.5 0.5 1.5 1.0 na555 iso
+
+target      = s 0.1 12 6 0 1 0 1
+photoperiod = 16
+
+end

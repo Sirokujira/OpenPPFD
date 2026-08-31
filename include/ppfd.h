@@ -78,12 +78,22 @@ typedef struct {
 	double  watt;                   /* ファイル記載の消費電力 [W] (参考値) */
 } photdist_t;
 
-/* ---- 鏡面反射の変換列 (鏡像の折り返し面の並び) ---------------------- */
+/* ---- 鏡面反射の変換 (箱型ビリヤードの展開指数) -----------------------
+軸並行の直方体では、互いに直交する面の鏡映は可換なので「折り返した面の
+並び」で鏡像を数えると同じ像を何度も数えてしまう (xmax→zmax と
+zmax→xmax は同じ点)。鏡映群は軸ごとの無限二面体群の直積なので、鏡像は
+軸ごとの展開指数 n[3] だけで一意に決まる :
+
+    n = 0 : 折り返さない
+    n > 0 : max 面から交互に n 回 (xmax, xmin, xmax, ...)
+    n < 0 : min 面から交互に |n| 回
+
+座標は n が偶数なら c + n L、奇数なら (n+1) L - c へ写る。 */
 #define MAXSPECT 512                /* 変換数の上限 (超えたらログに出して打ち切る) */
 typedef struct {
-	int     nmir;                   /* 折り返し回数 (1..specbounce) */
-	int     face[6];                /* face[0] = 放射側に最も近い折り返し面 */
-	double  w;                      /* 重み = Π ρs */
+	int     n[3];                   /* 軸ごとの展開指数 */
+	int     nmir;                   /* 折り返し回数 = |n0| + |n1| + |n2| */
+	double  w;                      /* 重み = 交差する面の Π ρs */
 } strans_t;
 
 /* ---- 光源 --------------------------------------------------------- */
@@ -135,7 +145,20 @@ typedef struct {
 	int     ndivu, ndivv;           /* 1 面あたりの分割数 (0 = patchdiv に従う) */
 } occluder_t;
 
-/* ---- 群落 (Beer-Lambert 減衰スラブ + 衝突源二流散乱) ---------------- */
+/* ---- 群落スラブ 1 枚 (多段ラックでは段ごとに 1 枚置ける) ------------ */
+typedef struct {
+	double  ztop, zbot;             /* ztop > zbot */
+	double  lai;                    /* 葉面積指数 [-] */
+	double  k0;                     /* 葉群投影係数 G */
+	double  a;                      /* 葉面積密度 = lai / (ztop - zbot) [1/m] */
+	double  w;                      /* 先頭スラブ基準の減衰重み = (k0 a) / (k0_0 a_0)。
+	                                   先頭は厳密に 1.0 なので 1 枚だけの入力は
+	                                   従来と 1 ビットも変わらない */
+} cslab_t;
+
+/* ---- 群落 (Beer-Lambert 減衰スラブ + 衝突源二流散乱) ----------------
+先頭スラブ (slab[0]) の諸元をそのまま持つ。散乱モデル (scatter) は
+1 枚のときだけ有効なので、その場合これが唯一のスラブになる。 */
 typedef struct {
 	int     on;
 	double  ztop, zbot;             /* ztop > zbot */
@@ -163,7 +186,7 @@ typedef struct {
 	int       ndivu, ndivv;         /* 1 面あたりの分割数 */
 
 	/* 入力テーブル */
-	int       nmat, nspec, nemit, ntarget, nband, ndist, nocc;
+	int       nmat, nspec, nemit, ntarget, nband, ndist, nocc, nslab;
 	pmat_t   *mat;
 	spec_t   *spec;
 	emitter_t *emit;
@@ -171,6 +194,7 @@ typedef struct {
 	band_t   *band;
 	photdist_t *dist;
 	occluder_t *occ;
+	cslab_t   *slab;                /* [nslab] 群落スラブ (z の昇順、重なりなし) */
 	canopy_t  canopy;
 
 	/* 解析条件 */
@@ -302,6 +326,7 @@ void    setup_images(ppfd_t *);
 int     spec_transforms(const ppfd_t *, strans_t *, int);
 vec3_t  spec_apply(const ppfd_t *, const strans_t *, vec3_t);
 vec3_t  spec_apply_dir(const strans_t *, vec3_t);
+int     spec_on_mirror(const ppfd_t *, const strans_t *, const patch_t *);
 void    direct_point(const ppfd_t *, vec3_t, vec3_t, double *);
 void    direct_point_ex(const ppfd_t *, vec3_t, vec3_t, double *, double *, double *);
 

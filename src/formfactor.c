@@ -409,7 +409,7 @@ void setup_ff(ppfd_t *p)
 						double dist, sj, f;
 						int    msub, nq, g, v;
 
-						if (qj->iface == tr[it].face[0]) continue;
+						if (spec_on_mirror(p, &tr[it], qj)) continue;
 						for (v = 0; v < 4; v++) q4[v] = spec_apply(p, &tr[it], qj->p[v]);
 						nj = spec_apply_dir(&tr[it], qj->n);
 						cj = spec_apply(p, &tr[it], qj->c);
