@@ -197,6 +197,56 @@ int occ_blocked(const ppfd_t *p, vec3_t a, vec3_t b)
 	return 0;
 }
 
+
+/*
+鏡像への直線 a-b が遮蔽物に当たるか。n = 鏡像の展開指数
+(NULL または全 0 なら実在の線分なので occ_blocked と同じ)。
+
+鏡像への直線は箱型ビリヤードの展開なので、実経路は展開空間に並んだ
+チャンバの複製を順に通る。各軸の座標は直線上で単調なので、複製番号も
+軸ごとに 0 から n_a まで単調に進み、通りうる複製は添字の箱
+[0..n0] x [0..n1] x [0..n2] に収まる。複製 k の中で実経路が遮蔽物 O に
+当たる ⟺ 直線が O の複製 T_k(O) に当たる。T_k(O) は複製 k の内部に
+あるので、直線が通らない複製の T_k(O) に誤って当たることはない。
+軸並行の箱は軸ごとの鏡映で軸並行の箱に移るので、判定は slab 法のまま厳密。
+*/
+int occ_blocked_img(const ppfd_t *p, vec3_t a, vec3_t b, const int *n)
+{
+	const double teps = 1e-9;
+	const vec3_t d = v_sub(b, a);
+	int    m0, m1, m2, j0, j1, j2, io;
+
+	if ((n == NULL) || ((n[0] == 0) && (n[1] == 0) && (n[2] == 0))) {
+		return occ_blocked(p, a, b);
+	}
+	if (p->nocc == 0) return 0;
+
+	m0 = (n[0] < 0) ? -n[0] : n[0];
+	m1 = (n[1] < 0) ? -n[1] : n[1];
+	m2 = (n[2] < 0) ? -n[2] : n[2];
+	for (j0 = 0; j0 <= m0; j0++) {
+		const int k0 = (n[0] < 0) ? -j0 : j0;
+		for (j1 = 0; j1 <= m1; j1++) {
+			const int k1 = (n[1] < 0) ? -j1 : j1;
+			for (j2 = 0; j2 <= m2; j2++) {
+				const int k2 = (n[2] < 0) ? -j2 : j2;
+				for (io = 0; io < p->nocc; io++) {
+					const occluder_t *o = &p->occ[io];
+					const double xa = spec_axis_map(o->x0, p->Lx, k0), xb = spec_axis_map(o->x1, p->Lx, k0);
+					const double ya = spec_axis_map(o->y0, p->Ly, k1), yb = spec_axis_map(o->y1, p->Ly, k1);
+					const double za = spec_axis_map(o->z0, p->Lz, k2), zb = spec_axis_map(o->z1, p->Lz, k2);
+					double t0 = teps, t1 = 1.0 - teps;
+					if (!slab(a.x, d.x, (xa < xb) ? xa : xb, (xa < xb) ? xb : xa, &t0, &t1)) continue;
+					if (!slab(a.y, d.y, (ya < yb) ? ya : yb, (ya < yb) ? yb : ya, &t0, &t1)) continue;
+					if (!slab(a.z, d.z, (za < zb) ? za : zb, (za < zb) ? zb : za, &t0, &t1)) continue;
+					return 1;
+				}
+			}
+		}
+	}
+	return 0;
+}
+
 void setup_target(ppfd_t *p)
 {
 	int it;

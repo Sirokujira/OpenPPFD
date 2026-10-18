@@ -110,6 +110,8 @@ typedef struct {
 	double  crot;                   /* 配光軸まわりの回転 [deg] */
 	double  wsize, hsize;           /* 面光源の寸法 [m] (0 = 点光源) */
 	int     nu, nv;                 /* 面光源の分割数 */
+	int     img[3];                 /* 鏡像の展開指数 (実光源は 0,0,0)。遮蔽判定が
+	                                   鏡像への直線を折り返して棚板の鏡像と照合する */
 } emitter_t;
 
 /* ---- 壁パッチ (平面四角形) ---------------------------------------- */
@@ -312,12 +314,13 @@ void    setup_target(ppfd_t *);
 double  canopy_path(const ppfd_t *, vec3_t, vec3_t);
 void    canopy_trans(const ppfd_t *, double, double *);
 int     occ_blocked(const ppfd_t *, vec3_t, vec3_t);
+int     occ_blocked_img(const ppfd_t *, vec3_t, vec3_t, const int *);
 
 /* formfactor.c */
 double  ff_point_poly(vec3_t, vec3_t, const vec3_t *, int);
 double  ff_patch_poly(const patch_t *, const vec3_t *, int, int, vec3_t, vec3_t);
-double  vis_point_patch(const ppfd_t *, vec3_t, const patch_t *, int *);
-double  vis_patch_patch(const ppfd_t *, const patch_t *, const patch_t *, int *);
+double  vis_point_patch(const ppfd_t *, vec3_t, const patch_t *, const int *, int *);
+double  vis_patch_patch(const ppfd_t *, const patch_t *, const patch_t *, const int *, int *);
 void    setup_ff(ppfd_t *);
 
 /* direct.c */
@@ -327,6 +330,7 @@ int     spec_transforms(const ppfd_t *, strans_t *, int);
 vec3_t  spec_apply(const ppfd_t *, const strans_t *, vec3_t);
 vec3_t  spec_apply_dir(const strans_t *, vec3_t);
 int     spec_on_mirror(const ppfd_t *, const strans_t *, const patch_t *);
+double  spec_axis_map(double, double, int);
 void    direct_point(const ppfd_t *, vec3_t, vec3_t, double *);
 void    direct_point_ex(const ppfd_t *, vec3_t, vec3_t, double *, double *, double *);
 

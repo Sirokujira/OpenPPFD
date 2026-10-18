@@ -1,0 +1,33 @@
+# 検証 (q) の参照解 : mirror6.ppfd の鏡面側壁を「x 方向に 2 倍にした幾何」で
+# 置き換えたもの。鏡面のコードを一切通らない (遮蔽判定も実在の板 2 枚に
+# 対する素の直線判定だけ)。
+#
+# 板の鏡像 (x 1.1..1.3) を 2 枚目の板として置く。板の分割は div 4 4 で
+# mirror6.ppfd とそろえ、床は x 方向に 2 倍 (12 6) にしてパッチを 1 対 1 に
+# 対応させる。他の面は黒 = 放射しないので分割の違いは効かない。
+
+OpenPPFD 1 0
+title = folded-geometry reference for mirror6 (no specular code path)
+
+wavelength = 380 780 5
+chamber    = 2.0 1.0 1.0
+patchdiv   = 12 6
+
+material = black gray 0.0
+material = white gray 0.6
+
+wall = all  black
+wall = zmin white
+
+occluder = plate  0.7 0.9 0.3 0.7 0.57 0.57 white div 4 4
+occluder = plate2 1.1 1.3 0.3 0.7 0.57 0.57 white div 4 4
+
+spectrum = na555 mono 555
+
+led = 0.3 0.5 0.9 1.0 na555 iso
+led = 1.7 0.5 0.9 1.0 na555 iso
+
+target      = s 0.1 12 6 0 1 0 1
+photoperiod = 16
+
+end

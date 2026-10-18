@@ -88,7 +88,7 @@ static void gather_target(ppfd_t *p)
 				if (v_dot(q->n, v_sub(x, q->p[0])) <= 0.0) continue;
 				f = ff_point_poly(x, nz, q->p, 4);
 				if (f <= 0.0) continue;
-				f *= vis_point_patch(p, x, q, NULL);
+				f *= vis_point_patch(p, x, q, NULL, NULL);
 				if (f <= 0.0) continue;
 				s = canopy_path(p, x, q->c);
 				if (s > 0.0) {
@@ -117,6 +117,15 @@ static void gather_target(ppfd_t *p)
 					if (v_dot(nj, v_sub(x, q4[0])) <= 0.0) continue;
 					f = str[i2].w * ff_point_poly(x, nz, q4, 4);
 					if (f <= 0.0) continue;
+					if (p->nocc > 0) {
+						/* 鏡像パッチへの直線を折り返して棚板の鏡像と照合する */
+						patch_t qm = *q;
+						for (v = 0; v < 4; v++) qm.p[v] = q4[v];
+						qm.n = nj;
+						qm.c = spec_apply(p, &str[i2], q->c);
+						f *= vis_point_patch(p, x, &qm, str[i2].n, NULL);
+						if (f <= 0.0) continue;
+					}
 					/* 鏡像重心への直線から実経路の群落内長さを測る
 					   (床・天井の鏡映ぶんは canopy_path が折り返す) */
 					s = canopy_path(p, x, spec_apply(p, &str[i2], q->c));

@@ -49,9 +49,9 @@ rho_s * Phi を持ち、その直線が折り返し経路をそのまま表す�
 面の鏡映は可換なので、並びで数えると同じ像を何度も数えてしまう
 (xmax→zmax と zmax→xmax は同じ点)。
 
-【制限】鏡像からの直線は折り返した経路を表すので、遮蔽物があると遮蔽
-判定が合わない。両立は入力段で明示的に弾く (群落の経路長は canopy_path
-が折り返して測るので併用できる)。
+鏡像からの直線は折り返した経路を表すので、遮蔽判定も折り返して行う
+(occ_blocked_img : 通りうるチャンバの複製それぞれにある棚板の鏡像と照合)。
+群落の経路長も canopy_path が折り返して測る。
 */
 
 /* 軸 a の展開指数 n に対応する重み (交差する面の Π ρs)。0 なら経路なし */
@@ -71,8 +71,8 @@ static double axis_weight(const double *rs, int a, int n)
 	return w;
 }
 
-/* 展開指数 n における軸 a の座標写像 (箱の長さ L) */
-static double axis_map(double c, double L, int n)
+/* 展開指数 n における軸 a の座標写像 (箱の長さ L)。遮蔽判定 (geometry.c) も使う */
+double spec_axis_map(double c, double L, int n)
 {
 	/* C の % は負数で符号が残るので、奇数判定はそのまま使える */
 	return ((n % 2) == 0) ? (c + ((double)n * L)) : (((double)(n + 1) * L) - c);
@@ -128,9 +128,9 @@ int spec_transforms(const ppfd_t *p, strans_t *tr, int maxn)
 /* 変換を点に適用する */
 vec3_t spec_apply(const ppfd_t *p, const strans_t *t, vec3_t a)
 {
-	a.x = axis_map(a.x, p->Lx, t->n[0]);
-	a.y = axis_map(a.y, p->Ly, t->n[1]);
-	a.z = axis_map(a.z, p->Lz, t->n[2]);
+	a.x = spec_axis_map(a.x, p->Lx, t->n[0]);
+	a.y = spec_axis_map(a.y, p->Ly, t->n[1]);
+	a.z = spec_axis_map(a.z, p->Lz, t->n[2]);
 	return a;
 }
 
@@ -160,7 +160,7 @@ int spec_on_mirror(const ppfd_t *p, const strans_t *t, const patch_t *q)
 	if (t->n[a] == 0) return 0;
 	L = (a == 0) ? p->Lx : ((a == 1) ? p->Ly : p->Lz);
 	c = (a == 0) ? q->p[0].x : ((a == 1) ? q->p[0].y : q->p[0].z);
-	return (axis_map(c, L, t->n[a]) == c);
+	return (spec_axis_map(c, L, t->n[a]) == c);
 }
 
 /*
@@ -212,6 +212,9 @@ void setup_images(ppfd_t *p)
 			im.ay  = spec_apply_dir(&tr[it], im.ay);
 			im.cx  = spec_apply_dir(&tr[it], im.cx);
 			im.cy  = spec_apply_dir(&tr[it], im.cy);
+			im.img[0] = tr[it].n[0];
+			im.img[1] = tr[it].n[1];
+			im.img[2] = tr[it].n[2];
 			p->emit[p->nemit++] = im;
 			p->nimage++;
 		}
@@ -260,7 +263,7 @@ void direct_point_ex(const ppfd_t *p, vec3_t x, vec3_t n, double *E, double *dep
 
 				cr = -v_dot(n, r) / d;          /* 受光面が光源を向く向き */
 				if (cr <= 0.0) continue;
-				if (occ_blocked(p, sp, x)) continue;   /* 棚板等の影 */
+				if (occ_blocked_img(p, sp, x, e->img)) continue;   /* 棚板等の影 (鏡像は折り返して判定) */
 
 				if (e->idist >= 0) {
 					/* 実測配光 : Î は ∫Î dΩ = 1 に正規化済みなので I = Φ Î */
@@ -368,7 +371,7 @@ static int patch_on_shadow_edge(const ppfd_t *p, const patch_t *q)
 	for (ie = 0; ie < p->nemit; ie++) {
 		int nb = 0;
 		for (k = 0; k < 5; k++) {
-			nb += occ_blocked(p, p->emit[ie].pos, xs[k]);
+			nb += occ_blocked_img(p, p->emit[ie].pos, xs[k], p->emit[ie].img);
 		}
 		if ((nb > 0) && (nb < 5)) return 1;
 	}

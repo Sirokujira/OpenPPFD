@@ -984,12 +984,6 @@ int input_data(FILE *fp, ppfd_t *p)
 				}
 			}
 		}
-		if (spec && (p->nocc > 0)) {
-			fprintf(stderr, "*** specular walls cannot be combined with occluders\n");
-			fprintf(stderr, "    (the mirror-image method folds the path; the shadow test\n");
-			fprintf(stderr, "     on the straight image ray would be wrong)\n");
-			return 1;
-		}
 		if (spec && p->canopy.on) {
 			/*
 			側壁 (x/y 面) の鏡映は z を保つので群落スラブは鏡映で不変。

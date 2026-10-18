@@ -198,8 +198,9 @@ static vec3_t patch_sample(const patch_t *q, int iu, int iv, int nsub)
 /*
 点 x からパッチ q の可視率 (0..1)。遮蔽物が無ければ 1。
 判定が割れたら細分し、そのとき *refined を 1 にする (診断用)。
+n は q が鏡像パッチのときの展開指数 (実在のパッチなら NULL)。
 */
-double vis_point_patch(const ppfd_t *p, vec3_t x, const patch_t *q, int *refined)
+double vis_point_patch(const ppfd_t *p, vec3_t x, const patch_t *q, const int *n, int *refined)
 {
 	int nsub, pass;
 
@@ -211,7 +212,7 @@ double vis_point_patch(const ppfd_t *p, vec3_t x, const patch_t *q, int *refined
 		for (jv = 0; jv < nsub; jv++) {
 			for (ju = 0; ju < nsub; ju++) {
 				ntot++;
-				if (!occ_blocked(p, x, patch_sample(q, ju, jv, nsub))) nvis++;
+				if (!occ_blocked_img(p, x, patch_sample(q, ju, jv, nsub), n)) nvis++;
 			}
 		}
 		if ((nvis == 0) || (nvis == ntot) || (pass == 1)) {
@@ -222,8 +223,8 @@ double vis_point_patch(const ppfd_t *p, vec3_t x, const patch_t *q, int *refined
 	return 1.0;
 }
 
-/* パッチ i からパッチ j の可視率 (0..1)。遮蔽物が無ければ 1 */
-double vis_patch_patch(const ppfd_t *p, const patch_t *qi, const patch_t *qj, int *refined)
+/* パッチ i からパッチ j の可視率 (0..1)。遮蔽物が無ければ 1。n は vis_point_patch と同じ */
+double vis_patch_patch(const ppfd_t *p, const patch_t *qi, const patch_t *qj, const int *n, int *refined)
 {
 	int nsub, pass;
 
@@ -238,7 +239,7 @@ double vis_patch_patch(const ppfd_t *p, const patch_t *qi, const patch_t *qj, in
 				for (jv = 0; jv < nsub; jv++) {
 					for (ju = 0; ju < nsub; ju++) {
 						ntot++;
-						if (!occ_blocked(p, si, patch_sample(qj, ju, jv, nsub))) nvis++;
+						if (!occ_blocked_img(p, si, patch_sample(qj, ju, jv, nsub), n)) nvis++;
 					}
 				}
 			}
@@ -292,7 +293,7 @@ void setup_ff(ppfd_t *p)
 				p->plen[((size_t)i * n) + j] = (float)canopy_path(p, qi->c, qj->c);
 			}
 
-			vis = vis_patch_patch(p, qi, qj, &refined);
+			vis = vis_patch_patch(p, qi, qj, NULL, &refined);
 			npartial += refined;
 			if (vis <= 0.0) continue;
 
@@ -392,8 +393,9 @@ void setup_ff(ppfd_t *p)
 
 		if (nt > 0) {
 			int is;
+			int npart_s = 0;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(dynamic) reduction(+:npart_s)
 #endif
 			for (is = 0; is < n; is++) {
 				vec3_t xs[144];
@@ -425,6 +427,20 @@ void setup_ff(ppfd_t *p)
 							if (v_dot(nj, v_sub(xs[g], q4[0])) <= 0.0) continue;
 							f += ws[g] * ff_point_poly(xs[g], qi->n, q4, 4);
 						}
+						if ((f > 0.0) && (p->nocc > 0)) {
+							/*
+							棚板の影 : 鏡像パッチへの直線を折り返して、通りうる
+							チャンバの複製それぞれにある棚板の鏡像と照合する
+							(occ_blocked_img)。鏡像パッチは角を写した仮のパッチで表す。
+							*/
+							patch_t qm = *qj;
+							int     refined = 0;
+							for (v = 0; v < 4; v++) qm.p[v] = q4[v];
+							qm.n = nj;
+							qm.c = cj;
+							f *= vis_patch_patch(p, qi, &qm, tr[it].n, &refined);
+							npart_s += refined;
+						}
 						if (p->nst > 0) {
 							const size_t k = ((size_t)it * n * n) + ((size_t)is * n) + j;
 							p->ffs[k] = tr[it].w * f;
@@ -435,6 +451,9 @@ void setup_ff(ppfd_t *p)
 						}
 					}
 				}
+			}
+			if (p->nocc > 0) {
+				plog(p, "specular ff : partially shadowed mirrored patch pairs = %d\n", npart_s);
 			}
 			plog(p, "specular ff : %d mirror transforms %s\n",
 				nt, (p->nst > 0) ? "kept separate (canopy attenuation per folded path)"

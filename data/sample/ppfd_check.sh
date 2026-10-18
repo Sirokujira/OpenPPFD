@@ -496,6 +496,41 @@ run mirror5ref.ppfd
 chkabs "twomirror: folded equivalence" "$(maxdiff map_m5.csv ppfd_map_s.csv)" 1e-6
 
 echo
+echo "== (q) specular walls + occluders (folded shadow test) =="
+# 鏡像への直線は箱型ビリヤードの展開なので、実経路は展開空間に並んだ
+# チャンバの複製を順に通る。遮蔽判定は「通りうる複製それぞれにある棚板の
+# 鏡像」と照合すれば厳密になる (occ_blocked_img)。mirror6.ppfd の板は
+# 反射光の 1 本目の脚だけを遮り、鏡像への直線は実在の板に当たらないので、
+# 素の直線判定では影が消える (+18.7%)。
+# (1) 板と床を黒くした変種 : 残るのは実光源の 1 本だけ
+sed -e 's/^wall = zmin white/wall = zmin black/' -e 's/ white div 4 4/ black div 4 4/' \
+    -e 's/^target      = s 0.1 12 6/target      = s 0.1 1 1/' \
+	"$SRC/mirror6.ppfd" > "$WORK/mirror6d.ppfd"
+run mirror6d.ppfd
+chk "specocc: reflected leg shadowed" "$(sumval 5)" 0.5267227 1e-6
+# (2) 板にも拡散反射させて収支と二重箱等価 (板の鏡像を実在の 2 枚目として置く)。
+# 遮蔽物があるときの収支は影の境界の求積で 1e-4 台が下限 (形態係数の問題ではない)
+run mirror6.ppfd
+chkabs "specocc: closure" "$(logval 'closure error')" 1e-3
+cp "$WORK/ppfd_map_s.csv" "$WORK/map_m6.csv"
+run mirror6ref.ppfd
+chkabs "specocc: folded equivalence" "$(maxdiff map_m6.csv ppfd_map_s.csv)" 1e-6
+# (3) 鏡面 2 面 (xmax, zmax) + 板 : 角の鏡像への直線は 4 つの複製を通るので、
+# 参照解は 2 x 1 x 2 の箱に板 4 枚。mirror5 / mirror5ref に板を足して作る。
+# 板の高さ 0.61 は検証の幾何の都合 : 0.57 だと影の境界判定 (patch_on_shadow_edge)
+# の判定点からの光線が板の辺 y = 0.3 をちょうどかすめ (t = 0.4 で y = 0.3)、
+# 参照解の側で鏡映どうしの丸めが割れて対称性が崩れる。かすめない高さを選ぶ。
+sed 's/^wall = zmax mirror/wall = zmax mirror\noccluder = plate 0.7 0.9 0.3 0.7 0.61 0.61 white div 4 4/' \
+	"$SRC/mirror5.ppfd" > "$WORK/mirror5o.ppfd"
+sed 's/^wall = ymin white/wall = ymin white\noccluder = p00 0.7 0.9 0.3 0.7 0.61 0.61 white div 4 4\noccluder = p10 1.1 1.3 0.3 0.7 0.61 0.61 white div 4 4\noccluder = p01 0.7 0.9 0.3 0.7 1.39 1.39 white div 4 4\noccluder = p11 1.1 1.3 0.3 0.7 1.39 1.39 white div 4 4/' \
+	"$SRC/mirror5ref.ppfd" > "$WORK/mirror5oref.ppfd"
+run mirror5o.ppfd
+chkabs "specocc2: closure" "$(logval 'closure error')" 1e-3
+cp "$WORK/ppfd_map_s.csv" "$WORK/map_m5o.csv"
+run mirror5oref.ppfd
+chkabs "specocc2: folded equivalence" "$(maxdiff map_m5o.csv ppfd_map_s.csv)" 1e-6
+
+echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2
 else
