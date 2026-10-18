@@ -204,7 +204,7 @@ double vis_point_patch(const ppfd_t *p, vec3_t x, const patch_t *q, const int *n
 {
 	int nsub, pass;
 
-	if (p->nocc == 0) return 1.0;
+	if (!occ_any(p)) return 1.0;
 
 	for (pass = 0; pass < 2; pass++) {
 		int nvis = 0, ntot = 0, ju, jv;
@@ -228,7 +228,7 @@ double vis_patch_patch(const ppfd_t *p, const patch_t *qi, const patch_t *qj, co
 {
 	int nsub, pass;
 
-	if (p->nocc == 0) return 1.0;
+	if (!occ_any(p)) return 1.0;
 
 	for (pass = 0; pass < 2; pass++) {
 		int nvis = 0, ntot = 0, iu, iv, ju, jv;
@@ -427,7 +427,7 @@ void setup_ff(ppfd_t *p)
 							if (v_dot(nj, v_sub(xs[g], q4[0])) <= 0.0) continue;
 							f += ws[g] * ff_point_poly(xs[g], qi->n, q4, 4);
 						}
-						if ((f > 0.0) && (p->nocc > 0)) {
+						if ((f > 0.0) && occ_any(p)) {
 							/*
 							棚板の影 : 鏡像パッチへの直線を折り返して、通りうる
 							チャンバの複製それぞれにある棚板の鏡像と照合する
@@ -452,7 +452,7 @@ void setup_ff(ppfd_t *p)
 					}
 				}
 			}
-			if (p->nocc > 0) {
+			if (occ_any(p)) {
 				plog(p, "specular ff : partially shadowed mirrored patch pairs = %d\n", npart_s);
 			}
 			plog(p, "specular ff : %d mirror transforms %s\n",

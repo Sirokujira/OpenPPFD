@@ -24,6 +24,10 @@ exp(-G·LAI/cosθ) に一致する (鉛直入射 s = LAI/a のとき exp(-G·LAI
 チャンバ + 遮蔽物は閉じた面の集合なので、形態係数の行和 = 1 と
 「全放射束が表面に吸収される」はそのまま成り立つ。
 
+■ 斜めの板 (panel)
+任意の向きの平行四辺形 (厚さ 0 の両面板)。表裏 2 面をパッチにし、遮蔽は
+「線分と平行四辺形の交差」で判定する (外接箱では代用しない)。
+
 面が壁と同一平面で接する置き方 (床の上に厚さのある箱を直に置く等) は
 避けること。同一平面のパッチどうしは互いに見えないものとして落とすので、
 その隙間に光が消える。棚板は厚さ 0 の板として与えるのが確実。
@@ -128,6 +132,13 @@ void setup_patch(ppfd_t *p)
 		}
 	}
 
+	for (io = 0; io < p->npanel; io++) {
+		panel_t *pn = &p->panel[io];
+		if (pn->ndivu < 1) pn->ndivu = p->ndivu;
+		if (pn->ndivv < 1) pn->ndivv = p->ndivv;
+		n += 2 * pn->ndivu * pn->ndivv;        /* 表と裏 */
+	}
+
 	p->npatch = n;
 	if (p->npatch > MAXPATCH) {
 		fprintf(stderr, "*** too many patches : %d > %d (reduce patchdiv / occluder div)\n",
@@ -151,6 +162,15 @@ void setup_patch(ppfd_t *p)
 			k = add_face(p->patch, k, fo, fu, fv, fn,
 				o->ndivu, o->ndivv, o->imat, 6 + (6 * io) + f);
 		}
+	}
+	for (io = 0; io < p->npanel; io++) {
+		const panel_t *pn = &p->panel[io];
+		const int base = 6 + (6 * p->nocc) + (2 * io);
+		/* 表 : eu x ev = n。裏は 2 辺を入れ替えて ev x eu = -n (格子は表と同じ) */
+		k = add_face(p->patch, k, pn->org, pn->eu, pn->ev, pn->n,
+			pn->ndivu, pn->ndivv, pn->imat, base);
+		k = add_face(p->patch, k, pn->org, pn->ev, pn->eu, v_scale(pn->n, -1.0),
+			pn->ndivv, pn->ndivu, pn->imat, base + 1);
 	}
 }
 
@@ -180,6 +200,31 @@ static int slab(double a, double d, double lo, double hi, double *t0, double *t1
 	return (*t0 <= *t1);
 }
 
+/*
+線分 a + t d (t ∈ (teps, 1-teps)) が平行四辺形 org + u eu + v ev
+(u, v ∈ [0, 1]) を横切るか。N = eu x ev (正規化しない)。
+平面に平行な線分 (面内を走るものを含む) は遮らない扱い : 厚さ 0 の板を
+真横から見る光線なので、遮る面積は 0。
+*/
+static int panel_hit(vec3_t a, vec3_t d, vec3_t org, vec3_t eu, vec3_t ev, double teps)
+{
+	const double geps = 1e-12;
+	const vec3_t N = v_cross(eu, ev);
+	const double nn = v_dot(N, N);
+	const double dn = v_dot(d, N);
+	double t, u, v;
+	vec3_t w;
+
+	if (fabs(dn) <= (1e-15 * sqrt(nn) * (v_norm(d) + 1e-300))) return 0;
+	t = v_dot(v_sub(org, a), N) / dn;
+	if ((t <= teps) || (t >= (1.0 - teps))) return 0;
+	w = v_sub(v_add(a, v_scale(d, t)), org);
+	/* w = u eu + v ev を外積で解く (eu と ev は直交とは限らない) */
+	u = v_dot(v_cross(w, ev), N) / nn;
+	v = v_dot(v_cross(eu, w), N) / nn;
+	return (u >= -geps) && (u <= (1.0 + geps)) && (v >= -geps) && (v <= (1.0 + geps));
+}
+
 int occ_blocked(const ppfd_t *p, vec3_t a, vec3_t b)
 {
 	const double teps = 1e-9;
@@ -194,7 +239,24 @@ int occ_blocked(const ppfd_t *p, vec3_t a, vec3_t b)
 		if (!slab(a.z, d.z, o->z0, o->z1, &t0, &t1)) continue;
 		return 1;
 	}
+	for (io = 0; io < p->npanel; io++) {
+		const panel_t *pn = &p->panel[io];
+		if (panel_hit(a, d, pn->org, pn->eu, pn->ev, teps)) return 1;
+	}
 	return 0;
+}
+
+/* 遮るものが 1 つでもあるか (棚板 / 斜めの板) */
+int occ_any(const ppfd_t *p)
+{
+	return (p->nocc + p->npanel) > 0;
+}
+
+/* 複製 (k0, k1, k2) への点の写像 (鏡像の展開。spec_axis_map を軸ごとに) */
+static vec3_t map_copy(const ppfd_t *p, vec3_t c, int k0, int k1, int k2)
+{
+	return v_make(spec_axis_map(c.x, p->Lx, k0), spec_axis_map(c.y, p->Ly, k1),
+	              spec_axis_map(c.z, p->Lz, k2));
 }
 
 
@@ -219,7 +281,7 @@ int occ_blocked_img(const ppfd_t *p, vec3_t a, vec3_t b, const int *n)
 	if ((n == NULL) || ((n[0] == 0) && (n[1] == 0) && (n[2] == 0))) {
 		return occ_blocked(p, a, b);
 	}
-	if (p->nocc == 0) return 0;
+	if (!occ_any(p)) return 0;
 
 	m0 = (n[0] < 0) ? -n[0] : n[0];
 	m1 = (n[1] < 0) ? -n[1] : n[1];
@@ -240,6 +302,14 @@ int occ_blocked_img(const ppfd_t *p, vec3_t a, vec3_t b, const int *n)
 					if (!slab(a.y, d.y, (ya < yb) ? ya : yb, (ya < yb) ? yb : ya, &t0, &t1)) continue;
 					if (!slab(a.z, d.z, (za < zb) ? za : zb, (za < zb) ? zb : za, &t0, &t1)) continue;
 					return 1;
+				}
+				for (io = 0; io < p->npanel; io++) {
+					/* 板の鏡像も平行四辺形 : 3 隅を写して辺を作り直す */
+					const panel_t *pn = &p->panel[io];
+					const vec3_t o0 = map_copy(p, pn->org, k0, k1, k2);
+					const vec3_t o1 = map_copy(p, v_add(pn->org, pn->eu), k0, k1, k2);
+					const vec3_t o3 = map_copy(p, v_add(pn->org, pn->ev), k0, k1, k2);
+					if (panel_hit(a, d, o0, v_sub(o1, o0), v_sub(o3, o0), teps)) return 1;
 				}
 			}
 		}

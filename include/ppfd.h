@@ -147,6 +147,19 @@ typedef struct {
 	int     ndivu, ndivv;           /* 1 面あたりの分割数 (0 = patchdiv に従う) */
 } occluder_t;
 
+/* ---- 斜めの板 (反射板・傾けたトレイ : 任意の向きの平行四辺形) --------
+厚さ 0 の両面板。表 (n = eu x ev の向き) と裏の 2 面がラジオシティに参加する。
+軸並行の遮蔽物 (occluder) の一般化だが、箱ではなく 1 枚の平面なので
+遮蔽判定は「線分と平行四辺形の交差」で行う。 */
+typedef struct {
+	char    name[NAMELEN];
+	vec3_t  org;                    /* 隅 p0 */
+	vec3_t  eu, ev;                 /* 2 辺 (p1 - p0, p3 - p0)。4 隅目 = p0 + eu + ev */
+	vec3_t  n;                      /* 表の単位法線 = (eu x ev) / |eu x ev| */
+	int     imat;                   /* 表面材料 (表裏共通) */
+	int     ndivu, ndivv;           /* eu / ev 方向の分割数 (0 = patchdiv に従う) */
+} panel_t;
+
 /* ---- 群落スラブ 1 枚 (多段ラックでは段ごとに 1 枚置ける) ------------ */
 typedef struct {
 	double  ztop, zbot;             /* ztop > zbot */
@@ -188,7 +201,7 @@ typedef struct {
 	int       ndivu, ndivv;         /* 1 面あたりの分割数 */
 
 	/* 入力テーブル */
-	int       nmat, nspec, nemit, ntarget, nband, ndist, nocc, nslab;
+	int       nmat, nspec, nemit, ntarget, nband, ndist, nocc, nslab, npanel;
 	pmat_t   *mat;
 	spec_t   *spec;
 	emitter_t *emit;
@@ -196,6 +209,7 @@ typedef struct {
 	band_t   *band;
 	photdist_t *dist;
 	occluder_t *occ;
+	panel_t   *panel;               /* [npanel] 斜めの板 */
 	cslab_t   *slab;                /* [nslab] 群落スラブ (z の昇順、重なりなし) */
 	canopy_t  canopy;
 
@@ -314,6 +328,7 @@ void    setup_target(ppfd_t *);
 double  canopy_path(const ppfd_t *, vec3_t, vec3_t);
 void    canopy_trans(const ppfd_t *, double, double *);
 int     occ_blocked(const ppfd_t *, vec3_t, vec3_t);
+int     occ_any(const ppfd_t *);
 int     occ_blocked_img(const ppfd_t *, vec3_t, vec3_t, const int *);
 
 /* formfactor.c */

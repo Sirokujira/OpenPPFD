@@ -359,7 +359,7 @@ static int patch_on_shadow_edge(const ppfd_t *p, const patch_t *q)
 	vec3_t xs[5];
 	int    ie, k;
 
-	if (p->nocc == 0) return 0;
+	if (!occ_any(p)) return 0;
 
 	for (k = 0; k < 4; k++) {
 		const double u = ((k == 0) || (k == 3)) ? t : (1.0 - t);

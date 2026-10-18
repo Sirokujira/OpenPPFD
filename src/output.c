@@ -84,6 +84,13 @@ void output_log(ppfd_t *p)
 		plog(p, "occluder     : %-10s x %g..%g, y %g..%g, z %g..%g m, %s\n",
 			o->name, o->x0, o->x1, o->y0, o->y1, o->z0, o->z1, p->mat[o->imat].name);
 	}
+	for (ie = 0; ie < p->npanel; ie++) {
+		const panel_t *pn = &p->panel[ie];
+		const vec3_t p1 = v_add(pn->org, pn->eu), p3 = v_add(pn->org, pn->ev);
+		plog(p, "panel        : %-10s (%g %g %g) (%g %g %g) (%g %g %g), normal (%.4g %.4g %.4g), %s\n",
+			pn->name, pn->org.x, pn->org.y, pn->org.z, p1.x, p1.y, p1.z, p3.x, p3.y, p3.z,
+			pn->n.x, pn->n.y, pn->n.z, p->mat[pn->imat].name);
+	}
 	for (ie = 0; ie < p->nslab; ie++) {
 		const cslab_t *c = &p->slab[ie];
 		plog(p, "canopy       : z = %g..%g m, LAI = %g, G = %g, leaf = %s\n",
@@ -132,7 +139,7 @@ void output_log(ppfd_t *p)
 	plog(p, "\n--- energy balance ---\n");
 	plog(p, "emitted           = %12.6g W\n", p->flux_total);
 	plog(p, "absorbed by walls = %12.6g W%s\n", p->absorb_wall,
-		(p->nocc > 0) ? " (incl. occluders)" : "");
+		occ_any(p) ? " (incl. occluders)" : "");
 	plog(p, "mean wall irrad.  = %12.6g W/m2 (wall area %g m2)\n",
 		(awall > 0.0) ? (ewall / awall) : 0.0, awall);
 	if (p->canopy.on) {

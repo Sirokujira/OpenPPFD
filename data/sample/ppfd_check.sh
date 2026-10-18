@@ -531,6 +531,75 @@ run mirror5oref.ppfd
 chkabs "specocc2: folded equivalence" "$(maxdiff map_m5o.csv ppfd_map_s.csv)" 1e-6
 
 echo
+echo "== (r) tilted panels (arbitrary parallelogram plates) =="
+# tiltpanel.ppfd : 45 度傾けた黒い板。床の 3 点の直接光 (壁も黒なので間接光なし)
+run tiltpanel.ppfd
+# a : 光線が板の中心を貫く -> 厳密に 0
+chkabs "panel: shadowed point" "$(sumval 5)" 0
+# b : 光線は板の外接箱を通り抜けるが板の平面とは板の外で交わる -> 遮られない。
+#     箱として扱う実装ならここが 0 になる
+chk "panel: through bounding box" "$(awk -F, 'NR == 3 {print $5; exit}' "$WORK/ppfd_summary.csv")" 0.4127722 1e-6
+chk "panel: clear point" "$(awk -F, 'NR == 4 {print $5; exit}' "$WORK/ppfd_summary.csv")" 0.5267227 1e-6
+# 白い壁 (rho 0.5) と白い板 : 閉キャビティの収支。遮蔽物の影の境界は可視率の
+# 標本化なので 1e-3 台が下限 (同じ位置の軸並行の板でも同じ桁 : 3.7e-4)
+sed -e 's/^wall = all black/wall = all white/' -e 's/ black div 4 4/ white div 4 4/' \
+    -e 's/^material = white gray 0.8/material = white gray 0.5/' \
+    -e '/^target/d' -e 's/^photoperiod/target = floor 0.1 12 12\nphotoperiod/' \
+	"$SRC/tiltpanel.ppfd" > "$WORK/panelw.ppfd"
+run panelw.ppfd
+chkabs "panel: closure (rho 0.5)" "$(logval 'closure error')" 2e-3
+cp "$WORK/ppfd_map_floor.csv" "$WORK/map_pw.csv"
+# 板を x = y で鏡映すると (光源も箱も x = y について対称) 床の分布は転置になる
+sed 's/^panel = tilt 0.3 0.3 0.4  0.5 0.3 0.6  0.3 0.7 0.4/panel = tilt 0.3 0.3 0.4  0.3 0.5 0.6  0.7 0.3 0.4/' \
+	"$WORK/panelw.ppfd" > "$WORK/panelwt.ppfd"
+run panelwt.ppfd
+chkabs "panel: x=y mirror -> transpose" "$(maxdiff map_pw.csv ppfd_map_floor.csv 1)" 1e-9
+# 水平な panel は厚さ 0 の occluder と同じ (mirror6.ppfd の板を置き換え。鏡面の
+# 折り返し判定 occ_blocked_img の板の側も通る)
+run mirror6.ppfd
+cp "$WORK/ppfd_map_s.csv" "$WORK/map_m6b.csv"
+sed 's/^occluder = plate 0.7 0.9 0.3 0.7 0.57 0.57 white div 4 4/panel = plate 0.7 0.3 0.57  0.9 0.3 0.57  0.7 0.7 0.57 white div 4 4/' \
+	"$SRC/mirror6.ppfd" > "$WORK/mirror6p.ppfd"
+run mirror6p.ppfd
+chkabs "panel: horizontal == occluder" "$(maxdiff map_m6b.csv ppfd_map_s.csv)" 1e-9
+# 鏡面 + 斜めの板 : 板の鏡像 (x -> 2 - x) を実在の 2 枚目として置いた参照解と比べる
+sed 's/^occluder = plate .*/panel = tilt 0.71 0.33 0.52  0.88 0.33 0.67  0.71 0.69 0.52  white div 4 4/' \
+	"$SRC/mirror6.ppfd" > "$WORK/mirror6t.ppfd"
+sed -e 's/^occluder = plate .*/panel = tilt 0.71 0.33 0.52  0.88 0.33 0.67  0.71 0.69 0.52  white div 4 4/' \
+    -e 's/^occluder = plate2 .*/panel = tilt2 1.29 0.33 0.52  1.12 0.33 0.67  1.29 0.69 0.52  white div 4 4/' \
+	"$SRC/mirror6ref.ppfd" > "$WORK/mirror6tref.ppfd"
+run mirror6t.ppfd
+chkabs "panel: specular closure" "$(logval 'closure error')" 1e-3
+cp "$WORK/ppfd_map_s.csv" "$WORK/map_m6t.csv"
+run mirror6tref.ppfd
+chkabs "panel: specular folded equiv." "$(maxdiff map_m6t.csv ppfd_map_s.csv)" 1e-6
+# 退化した板 (3 隅が一直線) とチャンバからはみ出す板は入力段で弾かれる
+sed 's/^panel = tilt .*/panel = tilt 0.3 0.3 0.4  0.5 0.3 0.6  0.7 0.3 0.8  black/' "$SRC/tiltpanel.ppfd" > "$WORK/paneldeg.ppfd"
+if (cd "$WORK" && "$OPPFD" paneldeg.ppfd > /dev/null 2>&1); then
+	echo "panel: degenerate rejected -> NG (accepted a collinear panel)" >&2
+	status=1
+else
+	echo "panel: degenerate rejected -> OK"
+fi
+sed 's/^panel = tilt .*/panel = tilt 0.3 0.3 0.4  0.5 0.3 0.6  0.3 1.2 0.4  black/' "$SRC/tiltpanel.ppfd" > "$WORK/panelout.ppfd"
+if (cd "$WORK" && "$OPPFD" panelout.ppfd > /dev/null 2>&1); then
+	echo "panel: outside chamber rejected -> NG (accepted a panel outside the box)" >&2
+	status=1
+else
+	echo "panel: outside chamber rejected -> OK"
+fi
+# 鏡面を運ぶのは壁だけ。棚板・板に鏡面材料を付けると ρs が帳簿から消える
+# (-1.4%) ので入力段で弾かれる (遮蔽物にもともとあった穴を同時に塞いだ)
+sed 's/^occluder = plate 0.7 0.9 0.3 0.7 0.57 0.57 white div 4 4/occluder = plate 0.7 0.9 0.3 0.7 0.57 0.57 mirror div 4 4/' \
+	"$SRC/mirror6.ppfd" > "$WORK/occspec.ppfd"
+if (cd "$WORK" && "$OPPFD" occspec.ppfd > /dev/null 2>&1); then
+	echo "plate: specular material rejected -> NG (accepted a specular occluder)" >&2
+	status=1
+else
+	echo "plate: specular material rejected -> OK"
+fi
+
+echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2
 else

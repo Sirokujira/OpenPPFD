@@ -483,7 +483,7 @@ int input_data(FILE *fp, ppfd_t *p)
 	char   strline[BUFSIZ], strsave[BUFSIZ];
 	char  *token[MAXTOKEN];
 	const char sep[] = " \t";
-	int    cmat = 0, cspec = 0, cemit = 0, ctarget = 0, cband = 0, cocc = 0, cslab = 0;
+	int    cmat = 0, cspec = 0, cemit = 0, ctarget = 0, cband = 0, cocc = 0, cslab = 0, cpanel = 0;
 	int    i;
 	double *ax_lam = NULL, *ax_v = NULL, *ax_v2 = NULL;
 	int    nax = 0;
@@ -786,6 +786,44 @@ int input_data(FILE *fp, ppfd_t *p)
 			APPEND(p->occ, p->nocc, cocc, occluder_t);
 			p->occ[p->nocc++] = o;
 		}
+		else if (!strcmp(token[0], "panel")) {
+			/*
+			panel = name x0 y0 z0  x1 y1 z1  x3 y3 z3  material [div nu nv]
+			隅 p0 と、p0 に隣り合う 2 隅 p1 (u 辺の端), p3 (v 辺の端) で
+			平行四辺形を与える (4 隅目 = p1 + p3 - p0)。表は (p1-p0) x (p3-p0)。
+			*/
+			panel_t pn;
+			vec3_t  c;
+			double  an;
+			int     im;
+			if (ntok < 13) { fprintf(stderr, "*** invalid panel data\n"); ierr = 1; continue; }
+			memset(&pn, 0, sizeof(pn));
+			strncpy(pn.name, token[2], NAMELEN - 1);
+			pn.org = v_make(atof(token[3]), atof(token[4]), atof(token[5]));
+			pn.eu  = v_sub(v_make(atof(token[6]), atof(token[7]), atof(token[8])), pn.org);
+			pn.ev  = v_sub(v_make(atof(token[9]), atof(token[10]), atof(token[11])), pn.org);
+			im = find_mat(p, token[12]);
+			if (im < 0) {
+				fprintf(stderr, "*** unknown material : %s\n", token[12]);
+				ierr = 1;
+				continue;
+			}
+			pn.imat = im;
+			if ((ntok >= 16) && streq_ci(token[13], "div")) {
+				pn.ndivu = atoi(token[14]);
+				pn.ndivv = atoi(token[15]);
+			}
+			c = v_cross(pn.eu, pn.ev);
+			an = v_norm(c);
+			if (an <= (1e-12 * (v_dot(pn.eu, pn.eu) + v_dot(pn.ev, pn.ev)))) {
+				fprintf(stderr, "*** invalid panel data (degenerate parallelogram) : %s\n", pn.name);
+				ierr = 1;
+				continue;
+			}
+			pn.n = v_scale(c, 1.0 / an);
+			APPEND(p->panel, p->npanel, cpanel, panel_t);
+			p->panel[p->npanel++] = pn;
+		}
 		else if (!strcmp(token[0], "canopy")) {
 			int    im;
 			cslab_t sl;
@@ -901,6 +939,48 @@ int input_data(FILE *fp, ppfd_t *p)
 	if (p->ntarget == 0) {
 		fprintf(stderr, "*** no target plane (target)\n");
 		return 1;
+	}
+
+	/*
+	鏡面反射を運ぶのはチャンバの壁 (鏡像法) だけ。棚板や斜めの板に鏡面の
+	材料を付けると、その ρs の分は吸収 (1 - ρd - ρs) からも外され、どこへも
+	運ばれずに消える (収支が黙って破れる : 実測 -1.4%)。入力段で弾く。
+	*/
+	for (i = 0; i < p->nocc; i++) {
+		if (p->mat[p->occ[i].imat].rhos > 0.0) {
+			fprintf(stderr, "*** occluder \"%s\" : specular material \"%s\" is not supported\n",
+				p->occ[i].name, p->mat[p->occ[i].imat].name);
+			fprintf(stderr, "    (specular reflection is modelled on chamber walls only)\n");
+			return 1;
+		}
+	}
+	for (i = 0; i < p->npanel; i++) {
+		if (p->mat[p->panel[i].imat].rhos > 0.0) {
+			fprintf(stderr, "*** panel \"%s\" : specular material \"%s\" is not supported\n",
+				p->panel[i].name, p->mat[p->panel[i].imat].name);
+			fprintf(stderr, "    (specular reflection is modelled on chamber walls only)\n");
+			return 1;
+		}
+	}
+
+	/*
+	斜めの板はチャンバの内側に収める。はみ出すと板の裏表が壁の外の何も
+	無い空間を見ることになり、閉じた面の集合でなくなって収支が壊れる。
+	*/
+	for (i = 0; i < p->npanel; i++) {
+		const panel_t *pn = &p->panel[i];
+		const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+		int k;
+		for (k = 0; k < 4; k++) {
+			const vec3_t c = v_add(pn->org, v_add(((k == 1) || (k == 2)) ? pn->eu : v_make(0, 0, 0),
+			                                     (k >= 2) ? pn->ev : v_make(0, 0, 0)));
+			if ((c.x < -tol) || (c.x > p->Lx + tol) || (c.y < -tol) || (c.y > p->Ly + tol)
+			 || (c.z < -tol) || (c.z > p->Lz + tol)) {
+				fprintf(stderr, "*** panel \"%s\" sticks out of the chamber "
+					"(corner %g %g %g)\n", pn->name, c.x, c.y, c.z);
+				return 1;
+			}
+		}
 	}
 
 	/* ---- 群落スラブ : z の降順に並べ、重なりを弾き、減衰重みを決める ---- */

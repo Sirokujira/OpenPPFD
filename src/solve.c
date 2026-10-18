@@ -117,7 +117,7 @@ static void gather_target(ppfd_t *p)
 					if (v_dot(nj, v_sub(x, q4[0])) <= 0.0) continue;
 					f = str[i2].w * ff_point_poly(x, nz, q4, 4);
 					if (f <= 0.0) continue;
-					if (p->nocc > 0) {
+					if (occ_any(p)) {
 						/* 鏡像パッチへの直線を折り返して棚板の鏡像と照合する */
 						patch_t qm = *q;
 						for (v = 0; v < 4; v++) qm.p[v] = q4[v];
@@ -209,7 +209,7 @@ void solve(ppfd_t *p)
 	t0 = cputime();
 	setup_patch(p);
 	setup_target(p);
-	plog(p, "patches = %d (chamber %d x %d x %d, occluders %d), spectral bins = %d\n",
+	plog(p, "patches = %d (chamber %d x %d x %d, occluders/panels %d), spectral bins = %d\n",
 		p->npatch, 6, p->ndivu, p->ndivv,
 		p->npatch - (6 * p->ndivu * p->ndivv), p->nlam);
 
@@ -222,10 +222,11 @@ void solve(ppfd_t *p)
 			"buried patches = %d of %d\n",
 			p->canopy.nlayer, p->cnorm_up, p->cnorm_dn, p->cnburied, p->npatch);
 	}
-	if (p->nocc > 0) {
+	if (occ_any(p)) {
 		/* 遮蔽が部分的な対だけは標本化 (= 厳密でない) なので数を出す */
-		plog(p, "occluders   : %d, partially shadowed patch pairs = %d, enclosed patches = %d\n",
-			p->nocc, p->ff_npartial, p->ff_nblind);
+		plog(p, "occluders   : %d, panels %d, partially shadowed patch pairs = %d, "
+			"enclosed patches = %d\n",
+			p->nocc, p->npanel, p->ff_npartial, p->ff_nblind);
 	}
 
 	setup_images(p);
