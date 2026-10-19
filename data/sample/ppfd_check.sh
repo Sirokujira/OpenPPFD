@@ -71,6 +71,11 @@ sumval() {
 	awk -F, -v c="$1" 'NR == 2 {print $c; exit}' "$WORK/ppfd_summary.csv"
 }
 
+# sumrow <面の名前> <列番号> : ppfd_summary.csv の指定の面の値
+sumrow() {
+	awk -F, -v n="$1" -v c="$2" 'NR > 1 && $1 == n {print $c; exit}' "$WORK/ppfd_summary.csv"
+}
+
 # maxdiff <map1.csv> <map2.csv> [1] : PPFD 列の最大相対差。
 # 第 3 引数 1 で 2 番目の表の (ix, iy) を入れ替えて比較する (90 度回転の判定用)。
 maxdiff() {
@@ -618,6 +623,49 @@ if (cd "$WORK" && "$OPPFD" occspec.ppfd > /dev/null 2>&1); then
 	status=1
 else
 	echo "plate: specular material rejected -> OK"
+fi
+
+echo "== (s) oriented sensors (vertical / downward measuring planes) =="
+# sensor.ppfd : 黒いチャンバの中心の点光源。どの向きの面も直接光の解析解
+#   E = Phi/(4 pi) (n . (S - x)) / d^3   (n . (S - x) > 0 のときだけ)
+run sensor.ppfd
+chk "sensor: vertical (-x)"      "$(sumrow wall 5)" 1.6510888 1e-6
+chkabs "sensor: downward, below" "$(sumrow down 5)" 0
+chk "sensor: downward, above"    "$(sumrow ceil 5)" 4.1021631 1e-6
+# 同じ水平面を target と sensor で書いても分布がそろう。rack.ppfd (白壁・
+# 棚板・群落) に leafscatter を入れ、群落の内部 (z = 0.06) で比べる
+sed 's/^target = canopybase 0.06 25 13/target = canopybase 0.06 25 13\nsensor = cb2 0 0 0.06  1.2 0 0.06  0 0.6 0.06  25 13\nleafscatter = on/' \
+	"$SRC/rack.ppfd" > "$WORK/rack_sensor.ppfd"
+run rack_sensor.ppfd
+chkabs "sensor: == target (in canopy)" "$(maxdiff ppfd_map_canopybase.csv ppfd_map_cb2.csv)" 1e-12
+# 群落の内部の傾いた面 : 二流近似では各半球の放射輝度が一様なので
+#   E = F_down (1 + nz)/2 + F_up (1 - nz)/2
+# 光源を 3 つの面すべての平面上に置き (直接光は cos = 0 で 0)、壁を黒く
+# すると、残るのは群落の拡散場だけ : 上向き = F_down、下向き = F_up、
+# 鉛直 = その平均。要約 CSV は 6 桁なので 2e-6 で判定する
+# (F_down だけを使う誤った実装なら 1e-3 ずれる)
+sed -e 's/^material = black gray 0.0/material = black gray 0.0\nmaterial = leaf  gray 0.4 0.4/' \
+    -e 's/^led = 0.5 0.5 0.5 1.0 na555 iso/led = 0.5 0.2 0.5 1.0 na555 iso\ncanopy = 0.7 0.3 2.0 0.5 leaf\nleafscatter = on/' \
+    -e '/^sensor = /d' \
+    -e 's/^target = floor 0.1 1 1/target = floor 0.1 1 1\nsensor = up   0.4 0.4 0.5  0.6 0.4 0.5  0.4 0.6 0.5  1 1\nsensor = dn   0.4 0.4 0.5  0.4 0.6 0.5  0.6 0.4 0.5  1 1\nsensor = vert 0.5 0.4 0.4  0.5 0.4 0.6  0.5 0.6 0.4  1 1/' \
+	"$SRC/sensor.ppfd" > "$WORK/sensor_canopy.ppfd"
+run sensor_canopy.ppfd
+chk "sensor: tilted in canopy" "$(sumrow vert 5)" \
+	"$(awk -v u="$(sumrow up 5)" -v d="$(sumrow dn 5)" 'BEGIN {printf "%.9g", (u + d) / 2}')" 2e-6
+# はみ出す面・退化した面は入力段で弾かれる
+sed 's/^sensor = wall .*/sensor = wall  0.9 0.4 0.2  1.3 0.4 0.4  0.9 0.6 0.2  1 1/' "$SRC/sensor.ppfd" > "$WORK/sensorout.ppfd"
+if (cd "$WORK" && "$OPPFD" sensorout.ppfd > /dev/null 2>&1); then
+	echo "sensor: outside chamber rejected -> NG (accepted a sensor outside the box)" >&2
+	status=1
+else
+	echo "sensor: outside chamber rejected -> OK"
+fi
+sed 's/^sensor = wall .*/sensor = wall  0.9 0.4 0.2  0.9 0.4 0.4  0.9 0.4 0.6  1 1/' "$SRC/sensor.ppfd" > "$WORK/sensordeg.ppfd"
+if (cd "$WORK" && "$OPPFD" sensordeg.ppfd > /dev/null 2>&1); then
+	echo "sensor: degenerate rejected -> NG (accepted a collinear sensor)" >&2
+	status=1
+else
+	echo "sensor: degenerate rejected -> OK"
 fi
 
 echo

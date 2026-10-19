@@ -401,6 +401,13 @@ void setup_target(ppfd_t *p)
 			t->y0 = 0.0;
 			t->y1 = p->Ly;
 		}
+		if (!t->sensor) {
+			/* 水平で上向きの面も向きの情報を持たせておく (出力・群落内の扱い用) */
+			t->org = v_make(t->x0, t->y0, t->z);
+			t->eu  = v_make(t->x1 - t->x0, 0.0, 0.0);
+			t->ev  = v_make(0.0, t->y1 - t->y0, 0.0);
+			t->n   = v_make(0.0, 0.0, 1.0);
+		}
 		t->E = (double *)xcalloc((size_t)t->nx * t->ny * p->nlam, sizeof(double));
 	}
 }

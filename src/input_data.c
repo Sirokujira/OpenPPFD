@@ -744,6 +744,38 @@ int input_data(FILE *fp, ppfd_t *p)
 			APPEND(p->target, p->ntarget, ctarget, target_t);
 			p->target[p->ntarget++] = t;
 		}
+		else if (!strcmp(token[0], "sensor")) {
+			/*
+			sensor = name x0 y0 z0  x1 y1 z1  x3 y3 z3  nu nv
+			任意の向きの測定面。隅 p0 と隣り合う 2 隅 p1 (u 辺の端), p3 (v 辺の
+			端) の平行四辺形で、受光するのは (p1-p0) x (p3-p0) の側。
+			壁面栽培の垂直面・葉の側面・下向きのセンサ (床の照り返し) 用。
+			*/
+			target_t t;
+			vec3_t   c;
+			double   an;
+			if (ntok < 14) { fprintf(stderr, "*** invalid sensor data\n"); ierr = 1; continue; }
+			memset(&t, 0, sizeof(t));
+			strncpy(t.name, token[2], NAMELEN - 1);
+			t.sensor = 1;
+			t.org = v_make(atof(token[3]), atof(token[4]), atof(token[5]));
+			t.eu  = v_sub(v_make(atof(token[6]), atof(token[7]), atof(token[8])), t.org);
+			t.ev  = v_sub(v_make(atof(token[9]), atof(token[10]), atof(token[11])), t.org);
+			t.nx = atoi(token[12]);
+			t.ny = atoi(token[13]);
+			if ((t.nx < 1) || (t.ny < 1)) { fprintf(stderr, "*** invalid sensor data\n"); ierr = 1; continue; }
+			c = v_cross(t.eu, t.ev);
+			an = v_norm(c);
+			if (an <= (1e-12 * (v_dot(t.eu, t.eu) + v_dot(t.ev, t.ev)))) {
+				fprintf(stderr, "*** invalid sensor data (degenerate parallelogram) : %s\n", t.name);
+				ierr = 1;
+				continue;
+			}
+			t.n = v_scale(c, 1.0 / an);
+			t.z = t.org.z + (0.5 * (t.eu.z + t.ev.z));
+			APPEND(p->target, p->ntarget, ctarget, target_t);
+			p->target[p->ntarget++] = t;
+		}
 		else if (!strcmp(token[0], "occluder")) {
 			/* occluder = name x0 x1 y0 y1 z0 z1 material [div nu nv] */
 			occluder_t o;
@@ -939,6 +971,24 @@ int input_data(FILE *fp, ppfd_t *p)
 	if (p->ntarget == 0) {
 		fprintf(stderr, "*** no target plane (target)\n");
 		return 1;
+	}
+
+	/* 任意の向きの測定面はチャンバの内側に収める */
+	for (i = 0; i < p->ntarget; i++) {
+		const target_t *t = &p->target[i];
+		const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+		int k;
+		if (!t->sensor) continue;
+		for (k = 0; k < 4; k++) {
+			const vec3_t c = v_add(t->org, v_add(((k == 1) || (k == 2)) ? t->eu : v_make(0, 0, 0),
+			                                    (k >= 2) ? t->ev : v_make(0, 0, 0)));
+			if ((c.x < -tol) || (c.x > p->Lx + tol) || (c.y < -tol) || (c.y > p->Ly + tol)
+			 || (c.z < -tol) || (c.z > p->Lz + tol)) {
+				fprintf(stderr, "*** sensor \"%s\" sticks out of the chamber "
+					"(corner %g %g %g)\n", t->name, c.x, c.y, c.z);
+				return 1;
+			}
+		}
 	}
 
 	/*

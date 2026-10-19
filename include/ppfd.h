@@ -124,12 +124,18 @@ typedef struct {
 	int     iface;                  /* 所属面 0..5 */
 } patch_t;
 
-/* ---- 測定面 ------------------------------------------------------- */
+/* ---- 測定面 -------------------------------------------------------
+target キー : 水平で上向きの面 (z, x0..x1, y0..y1)。
+sensor キー : 任意の向きの平行四辺形 (隅 org と 2 辺 eu, ev)。受光するのは
+              n = (eu x ev)/|eu x ev| の側。nx, ny は eu, ev 方向の分割数。 */
 typedef struct {
 	char    name[NAMELEN];
-	double  z;                      /* 高さ [m] (水平面のみ) */
+	double  z;                      /* 高さ [m] (sensor は中心の高さ) */
 	int     nx, ny;
 	double  x0, x1, y0, y1;
+	int     sensor;                 /* 1 = sensor キー (任意の向き) */
+	vec3_t  org, eu, ev;            /* sensor の隅と 2 辺 */
+	vec3_t  n;                      /* 受光面の単位法線 (target は (0,0,1)) */
 	double *E;                      /* [nx*ny*nlam] 分光放射照度 [W/m²] */
 } target_t;
 
@@ -317,7 +323,7 @@ double  canopy_kext(const ppfd_t *, int);
 double  canopy_segments(const ppfd_t *, vec3_t, vec3_t, double *);
 void    canopy_setup(ppfd_t *);
 void    canopy_field(ppfd_t *, int, const double *, double *, double *);
-double  canopy_interior(const ppfd_t *, int, double);
+double  canopy_interior(const ppfd_t *, int, double, double);
 double  canopy_deposit(const ppfd_t *, vec3_t, vec3_t, double, double *, double *);
 void    canopy_column(const ppfd_t *, double, const double *,
                       double *, double *, double *, double *, double *);

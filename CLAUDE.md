@@ -20,7 +20,7 @@ V(λ) ではなく McCree 作用曲線、lm ではなく µmol/m²/s。この 2 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 
-# 検証 : 解析解・SI 定義値との比較 (全 89 判定)
+# 検証 : 解析解・SI 定義値との比較 (全 96 判定)
 sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
 ```
 
@@ -165,6 +165,12 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
   スカラにまとめられなくなる (入力段で弾く)。スラブの重なりも二重計上に
   なるので弾く。二流の散乱場は 1 本の鉛直カラムなので、`leafscatter` は
   スラブ 1 枚のときだけ有効。
+- **傾いた測定面の群落内の拡散照度は二流の上下の流束の重み付き平均**
+  (`canopy_interior`)。二流近似では各半球の放射輝度が一様なので、天頂から
+  角 β の面は `E = F↓ (1+cos β)/2 + F↑ (1-cos β)/2` で厳密。上向き
+  (`nz = 1`) では係数が厳密に 1 と 0 になり、従来の `target` と 1 ビットも
+  変わらない。`target` (水平・上向き) のセル中心は従来の式のまま計算し、
+  `sensor` だけ隅 + 2 辺で計算する (同じ平面なら分布がビット一致する)。
 - **群落の散乱は「素の遮断で運び、取り除いた分を配る」で組む**。現行の
   減衰係数の `√(1-ω)` は素の遮断率ではなく二流方程式の減衰固有値なので、
   これを据え置いたまま散乱を戻すと二重計上になる。`leafscatter = on` では

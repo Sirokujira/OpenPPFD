@@ -58,8 +58,12 @@ static void gather_target(ppfd_t *p)
 		for (ic = 0; ic < ncell; ic++) {
 			const int ix = ic % t->nx;
 			const int iy = ic / t->nx;
-			const vec3_t nz = {0.0, 0.0, 1.0};
-			const vec3_t x = {t->x0 + ((ix + 0.5) * dx), t->y0 + ((iy + 0.5) * dy), t->z};
+			/* 受光面の法線 (target は上向き (0,0,1)、sensor は任意の向き) */
+			const vec3_t nz = t->n;
+			/* target は従来の式のまま (1 ビットも変えないため)。sensor は隅 + 2 辺 */
+			const vec3_t x = t->sensor
+				? v_add(t->org, v_add(v_scale(t->eu, (ix + 0.5) / t->nx), v_scale(t->ev, (iy + 0.5) / t->ny)))
+				: v_make(t->x0 + ((ix + 0.5) * dx), t->y0 + ((iy + 0.5) * dy), t->z);
 			double *E = &t->E[(size_t)ic * nl];
 			int ip, il, i2;
 
@@ -76,7 +80,7 @@ static void gather_target(ppfd_t *p)
 					for (il = 0; il < nl; il++) E[il] += f * p->cbbot[il];
 				}
 				else {
-					for (il = 0; il < nl; il++) E[il] += canopy_interior(p, il, x.z);
+					for (il = 0; il < nl; il++) E[il] += canopy_interior(p, il, x.z, nz.z);
 				}
 			}
 
