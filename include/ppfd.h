@@ -348,7 +348,7 @@ vec3_t  spec_apply_dir(const strans_t *, vec3_t);
 int     spec_on_mirror(const ppfd_t *, const strans_t *, const patch_t *);
 double  spec_axis_map(double, double, int);
 void    direct_point(const ppfd_t *, vec3_t, vec3_t, double *);
-void    direct_point_ex(const ppfd_t *, vec3_t, vec3_t, double *, double *, double *);
+void    direct_point_ex(const ppfd_t *, vec3_t, vec3_t, double *, double *, double *, unsigned char *);
 
 /* radiosity.c */
 void    solve_radiosity(ppfd_t *);

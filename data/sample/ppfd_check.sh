@@ -517,9 +517,7 @@ run mirror6ref.ppfd
 chkabs "specocc: folded equivalence" "$(maxdiff map_m6.csv ppfd_map_s.csv)" 1e-6
 # (3) 鏡面 2 面 (xmax, zmax) + 板 : 角の鏡像への直線は 4 つの複製を通るので、
 # 参照解は 2 x 1 x 2 の箱に板 4 枚。mirror5 / mirror5ref に板を足して作る。
-# 板の高さ 0.61 は検証の幾何の都合 : 0.57 だと影の境界判定 (patch_on_shadow_edge)
-# の判定点からの光線が板の辺 y = 0.3 をちょうどかすめ (t = 0.4 で y = 0.3)、
-# 参照解の側で鏡映どうしの丸めが割れて対称性が崩れる。かすめない高さを選ぶ。
+# 板の高さ 0.61 はかすめにくい配置として選んだもの。下の 0.57 の判定も参照。
 sed 's/^wall = zmax mirror/wall = zmax mirror\noccluder = plate 0.7 0.9 0.3 0.7 0.61 0.61 white div 4 4/' \
 	"$SRC/mirror5.ppfd" > "$WORK/mirror5o.ppfd"
 sed 's/^wall = ymin white/wall = ymin white\noccluder = p00 0.7 0.9 0.3 0.7 0.61 0.61 white div 4 4\noccluder = p10 1.1 1.3 0.3 0.7 0.61 0.61 white div 4 4\noccluder = p01 0.7 0.9 0.3 0.7 1.39 1.39 white div 4 4\noccluder = p11 1.1 1.3 0.3 0.7 1.39 1.39 white div 4 4/' \
@@ -529,6 +527,16 @@ chkabs "specocc2: closure" "$(logval 'closure error')" 1e-3
 cp "$WORK/ppfd_map_s.csv" "$WORK/map_m5o.csv"
 run mirror5oref.ppfd
 chkabs "specocc2: folded equivalence" "$(maxdiff map_m5o.csv ppfd_map_s.csv)" 1e-6
+# 板の高さ 0.57 : 直接光の影の境界判定を「5% 内側の 4 隅 + 中心」の 5 点
+# (有理数の位置) でしていたころは、判定点からの光線が t = 0.4 でちょうど板の辺
+# y = 0.3 に乗り、参照解の鏡映の複製どうしで細分の有無が割れて 3.5e-5 ずれた。
+# 判定を粗い求積の Gauss 点 (√(3/5) を含む無理数の位置) で行うようにしてから 0。
+sed 's/ 0\.61 0\.61 / 0.57 0.57 /' "$WORK/mirror5o.ppfd" > "$WORK/mirror5g.ppfd"
+sed 's/ 0\.61 0\.61 / 0.57 0.57 /g; s/ 1\.39 1\.39 / 1.43 1.43 /g' "$WORK/mirror5oref.ppfd" > "$WORK/mirror5gref.ppfd"
+run mirror5g.ppfd
+cp "$WORK/ppfd_map_s.csv" "$WORK/map_m5g.csv"
+run mirror5gref.ppfd
+chkabs "specocc2: grazing height 0.57" "$(maxdiff map_m5g.csv ppfd_map_s.csv)" 1e-6
 
 echo
 echo "== (r) tilted panels (arbitrary parallelogram plates) =="
