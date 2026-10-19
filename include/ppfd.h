@@ -110,6 +110,8 @@ typedef struct {
 	double  crot;                   /* 配光軸まわりの回転 [deg] */
 	double  wsize, hsize;           /* 面光源の寸法 [m] (0 = 点光源) */
 	int     nu, nv;                 /* 面光源の分割数 */
+	int     img[3];                 /* 鏡像の展開指数 (実光源は 0,0,0)。遮蔽判定が
+	                                   鏡像への直線を折り返して棚板の鏡像と照合する */
 } emitter_t;
 
 /* ---- 壁パッチ (平面四角形) ---------------------------------------- */
@@ -122,12 +124,18 @@ typedef struct {
 	int     iface;                  /* 所属面 0..5 */
 } patch_t;
 
-/* ---- 測定面 ------------------------------------------------------- */
+/* ---- 測定面 -------------------------------------------------------
+target キー : 水平で上向きの面 (z, x0..x1, y0..y1)。
+sensor キー : 任意の向きの平行四辺形 (隅 org と 2 辺 eu, ev)。受光するのは
+              n = (eu x ev)/|eu x ev| の側。nx, ny は eu, ev 方向の分割数。 */
 typedef struct {
 	char    name[NAMELEN];
-	double  z;                      /* 高さ [m] (水平面のみ) */
+	double  z;                      /* 高さ [m] (sensor は中心の高さ) */
 	int     nx, ny;
 	double  x0, x1, y0, y1;
+	int     sensor;                 /* 1 = sensor キー (任意の向き) */
+	vec3_t  org, eu, ev;            /* sensor の隅と 2 辺 */
+	vec3_t  n;                      /* 受光面の単位法線 (target は (0,0,1)) */
 	double *E;                      /* [nx*ny*nlam] 分光放射照度 [W/m²] */
 } target_t;
 
@@ -144,6 +152,19 @@ typedef struct {
 	int     imat;                   /* 表面材料 */
 	int     ndivu, ndivv;           /* 1 面あたりの分割数 (0 = patchdiv に従う) */
 } occluder_t;
+
+/* ---- 斜めの板 (反射板・傾けたトレイ : 任意の向きの平行四辺形) --------
+厚さ 0 の両面板。表 (n = eu x ev の向き) と裏の 2 面がラジオシティに参加する。
+軸並行の遮蔽物 (occluder) の一般化だが、箱ではなく 1 枚の平面なので
+遮蔽判定は「線分と平行四辺形の交差」で行う。 */
+typedef struct {
+	char    name[NAMELEN];
+	vec3_t  org;                    /* 隅 p0 */
+	vec3_t  eu, ev;                 /* 2 辺 (p1 - p0, p3 - p0)。4 隅目 = p0 + eu + ev */
+	vec3_t  n;                      /* 表の単位法線 = (eu x ev) / |eu x ev| */
+	int     imat;                   /* 表面材料 (表裏共通) */
+	int     ndivu, ndivv;           /* eu / ev 方向の分割数 (0 = patchdiv に従う) */
+} panel_t;
 
 /* ---- 群落スラブ 1 枚 (多段ラックでは段ごとに 1 枚置ける) ------------ */
 typedef struct {
@@ -186,7 +207,7 @@ typedef struct {
 	int       ndivu, ndivv;         /* 1 面あたりの分割数 */
 
 	/* 入力テーブル */
-	int       nmat, nspec, nemit, ntarget, nband, ndist, nocc, nslab;
+	int       nmat, nspec, nemit, ntarget, nband, ndist, nocc, nslab, npanel;
 	pmat_t   *mat;
 	spec_t   *spec;
 	emitter_t *emit;
@@ -194,6 +215,7 @@ typedef struct {
 	band_t   *band;
 	photdist_t *dist;
 	occluder_t *occ;
+	panel_t   *panel;               /* [npanel] 斜めの板 */
 	cslab_t   *slab;                /* [nslab] 群落スラブ (z の昇順、重なりなし) */
 	canopy_t  canopy;
 
@@ -301,7 +323,7 @@ double  canopy_kext(const ppfd_t *, int);
 double  canopy_segments(const ppfd_t *, vec3_t, vec3_t, double *);
 void    canopy_setup(ppfd_t *);
 void    canopy_field(ppfd_t *, int, const double *, double *, double *);
-double  canopy_interior(const ppfd_t *, int, double);
+double  canopy_interior(const ppfd_t *, int, double, double);
 double  canopy_deposit(const ppfd_t *, vec3_t, vec3_t, double, double *, double *);
 void    canopy_column(const ppfd_t *, double, const double *,
                       double *, double *, double *, double *, double *);
@@ -312,12 +334,15 @@ void    setup_target(ppfd_t *);
 double  canopy_path(const ppfd_t *, vec3_t, vec3_t);
 void    canopy_trans(const ppfd_t *, double, double *);
 int     occ_blocked(const ppfd_t *, vec3_t, vec3_t);
+int     occ_any(const ppfd_t *);
+int     occ_blocked_img(const ppfd_t *, vec3_t, vec3_t, const int *);
+int     occ_aabb_overlap(const ppfd_t *, vec3_t, vec3_t, const int *);
 
 /* formfactor.c */
 double  ff_point_poly(vec3_t, vec3_t, const vec3_t *, int);
 double  ff_patch_poly(const patch_t *, const vec3_t *, int, int, vec3_t, vec3_t);
-double  vis_point_patch(const ppfd_t *, vec3_t, const patch_t *, int *);
-double  vis_patch_patch(const ppfd_t *, const patch_t *, const patch_t *, int *);
+double  vis_point_patch(const ppfd_t *, vec3_t, const patch_t *, const int *, int *);
+double  vis_patch_patch(const ppfd_t *, const patch_t *, const patch_t *, const int *, int *);
 void    setup_ff(ppfd_t *);
 
 /* direct.c */
@@ -327,8 +352,9 @@ int     spec_transforms(const ppfd_t *, strans_t *, int);
 vec3_t  spec_apply(const ppfd_t *, const strans_t *, vec3_t);
 vec3_t  spec_apply_dir(const strans_t *, vec3_t);
 int     spec_on_mirror(const ppfd_t *, const strans_t *, const patch_t *);
+double  spec_axis_map(double, double, int);
 void    direct_point(const ppfd_t *, vec3_t, vec3_t, double *);
-void    direct_point_ex(const ppfd_t *, vec3_t, vec3_t, double *, double *, double *);
+void    direct_point_ex(const ppfd_t *, vec3_t, vec3_t, double *, double *, double *, unsigned char *);
 
 /* radiosity.c */
 void    solve_radiosity(ppfd_t *);

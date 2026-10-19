@@ -58,8 +58,12 @@ static void gather_target(ppfd_t *p)
 		for (ic = 0; ic < ncell; ic++) {
 			const int ix = ic % t->nx;
 			const int iy = ic / t->nx;
-			const vec3_t nz = {0.0, 0.0, 1.0};
-			const vec3_t x = {t->x0 + ((ix + 0.5) * dx), t->y0 + ((iy + 0.5) * dy), t->z};
+			/* 受光面の法線 (target は上向き (0,0,1)、sensor は任意の向き) */
+			const vec3_t nz = t->n;
+			/* target は従来の式のまま (1 ビットも変えないため)。sensor は隅 + 2 辺 */
+			const vec3_t x = t->sensor
+				? v_add(t->org, v_add(v_scale(t->eu, (ix + 0.5) / t->nx), v_scale(t->ev, (iy + 0.5) / t->ny)))
+				: v_make(t->x0 + ((ix + 0.5) * dx), t->y0 + ((iy + 0.5) * dy), t->z);
 			double *E = &t->E[(size_t)ic * nl];
 			int ip, il, i2;
 
@@ -76,7 +80,7 @@ static void gather_target(ppfd_t *p)
 					for (il = 0; il < nl; il++) E[il] += f * p->cbbot[il];
 				}
 				else {
-					for (il = 0; il < nl; il++) E[il] += canopy_interior(p, il, x.z);
+					for (il = 0; il < nl; il++) E[il] += canopy_interior(p, il, x.z, nz.z);
 				}
 			}
 
@@ -88,7 +92,7 @@ static void gather_target(ppfd_t *p)
 				if (v_dot(q->n, v_sub(x, q->p[0])) <= 0.0) continue;
 				f = ff_point_poly(x, nz, q->p, 4);
 				if (f <= 0.0) continue;
-				f *= vis_point_patch(p, x, q, NULL);
+				f *= vis_point_patch(p, x, q, NULL, NULL);
 				if (f <= 0.0) continue;
 				s = canopy_path(p, x, q->c);
 				if (s > 0.0) {
@@ -117,6 +121,15 @@ static void gather_target(ppfd_t *p)
 					if (v_dot(nj, v_sub(x, q4[0])) <= 0.0) continue;
 					f = str[i2].w * ff_point_poly(x, nz, q4, 4);
 					if (f <= 0.0) continue;
+					if (occ_any(p)) {
+						/* 鏡像パッチへの直線を折り返して棚板の鏡像と照合する */
+						patch_t qm = *q;
+						for (v = 0; v < 4; v++) qm.p[v] = q4[v];
+						qm.n = nj;
+						qm.c = spec_apply(p, &str[i2], q->c);
+						f *= vis_point_patch(p, x, &qm, str[i2].n, NULL);
+						if (f <= 0.0) continue;
+					}
 					/* 鏡像重心への直線から実経路の群落内長さを測る
 					   (床・天井の鏡映ぶんは canopy_path が折り返す) */
 					s = canopy_path(p, x, spec_apply(p, &str[i2], q->c));
@@ -200,7 +213,7 @@ void solve(ppfd_t *p)
 	t0 = cputime();
 	setup_patch(p);
 	setup_target(p);
-	plog(p, "patches = %d (chamber %d x %d x %d, occluders %d), spectral bins = %d\n",
+	plog(p, "patches = %d (chamber %d x %d x %d, occluders/panels %d), spectral bins = %d\n",
 		p->npatch, 6, p->ndivu, p->ndivv,
 		p->npatch - (6 * p->ndivu * p->ndivv), p->nlam);
 
@@ -213,10 +226,11 @@ void solve(ppfd_t *p)
 			"buried patches = %d of %d\n",
 			p->canopy.nlayer, p->cnorm_up, p->cnorm_dn, p->cnburied, p->npatch);
 	}
-	if (p->nocc > 0) {
+	if (occ_any(p)) {
 		/* 遮蔽が部分的な対だけは標本化 (= 厳密でない) なので数を出す */
-		plog(p, "occluders   : %d, partially shadowed patch pairs = %d, enclosed patches = %d\n",
-			p->nocc, p->ff_npartial, p->ff_nblind);
+		plog(p, "occluders   : %d, panels %d, partially shadowed patch pairs = %d, "
+			"enclosed patches = %d\n",
+			p->nocc, p->npanel, p->ff_npartial, p->ff_nblind);
 	}
 
 	setup_images(p);

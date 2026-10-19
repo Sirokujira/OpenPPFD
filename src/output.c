@@ -84,6 +84,13 @@ void output_log(ppfd_t *p)
 		plog(p, "occluder     : %-10s x %g..%g, y %g..%g, z %g..%g m, %s\n",
 			o->name, o->x0, o->x1, o->y0, o->y1, o->z0, o->z1, p->mat[o->imat].name);
 	}
+	for (ie = 0; ie < p->npanel; ie++) {
+		const panel_t *pn = &p->panel[ie];
+		const vec3_t p1 = v_add(pn->org, pn->eu), p3 = v_add(pn->org, pn->ev);
+		plog(p, "panel        : %-10s (%g %g %g) (%g %g %g) (%g %g %g), normal (%.4g %.4g %.4g), %s\n",
+			pn->name, pn->org.x, pn->org.y, pn->org.z, p1.x, p1.y, p1.z, p3.x, p3.y, p3.z,
+			pn->n.x, pn->n.y, pn->n.z, p->mat[pn->imat].name);
+	}
 	for (ie = 0; ie < p->nslab; ie++) {
 		const cslab_t *c = &p->slab[ie];
 		plog(p, "canopy       : z = %g..%g m, LAI = %g, G = %g, leaf = %s\n",
@@ -132,7 +139,7 @@ void output_log(ppfd_t *p)
 	plog(p, "\n--- energy balance ---\n");
 	plog(p, "emitted           = %12.6g W\n", p->flux_total);
 	plog(p, "absorbed by walls = %12.6g W%s\n", p->absorb_wall,
-		(p->nocc > 0) ? " (incl. occluders)" : "");
+		occ_any(p) ? " (incl. occluders)" : "");
 	plog(p, "mean wall irrad.  = %12.6g W/m2 (wall area %g m2)\n",
 		(awall > 0.0) ? (ewall / awall) : 0.0, awall);
 	if (p->canopy.on) {
@@ -159,7 +166,15 @@ void output_log(ppfd_t *p)
 		tstat_t   st;
 		target_stat(p, t, &st);
 
-		plog(p, "\n--- target \"%s\" (z = %g m, %d x %d cells) ---\n", t->name, t->z, t->nx, t->ny);
+		if (t->sensor) {
+			const vec3_t p1 = v_add(t->org, t->eu), p3 = v_add(t->org, t->ev);
+			plog(p, "\n--- sensor \"%s\" ((%g %g %g) (%g %g %g) (%g %g %g), normal (%.4g %.4g %.4g), "
+				"%d x %d cells) ---\n", t->name, t->org.x, t->org.y, t->org.z, p1.x, p1.y, p1.z,
+				p3.x, p3.y, p3.z, t->n.x, t->n.y, t->n.z, t->nx, t->ny);
+		}
+		else {
+			plog(p, "\n--- target \"%s\" (z = %g m, %d x %d cells) ---\n", t->name, t->z, t->nx, t->ny);
+		}
 		plog(p, "%-22s %12s %12s %12s\n", "quantity", "average", "min", "max");
 		plog(p, "%-22s %12.5g %12.5g %12.5g\n", "PPFD [umol/m2/s]", st.avg, st.min, st.max);
 		plog(p, "%-22s %12.5g\n", "YPFD (McCree)", st.ypfd);
@@ -205,18 +220,39 @@ void output_csv(ppfd_t *p)
 		snprintf(fn, sizeof(fn), "ppfd_map_%s.csv", t->name);
 		fp = fopen(fn, "w");
 		if (fp == NULL) continue;
-		fprintf(fp, "ix,iy,x_m,y_m,ppfd_umol_m2_s,ypfd_umol_m2_s,epar_umol_m2_s,lux,irradiance_W_m2,r_fr\n");
+		/*
+		列 1-10 は target / sensor 共通 (5 列目が PPFD)。sensor は 3, 4 列目を
+		面内の座標 u, v [m] (隅からの eu, ev 方向の距離) にし、セル中心の
+		x, y, z を末尾に足す。
+		*/
+		if (t->sensor) {
+			fprintf(fp, "ix,iy,u_m,v_m,ppfd_umol_m2_s,ypfd_umol_m2_s,epar_umol_m2_s,lux,irradiance_W_m2,r_fr,"
+			            "x_m,y_m,z_m\n");
+		}
+		else {
+			fprintf(fp, "ix,iy,x_m,y_m,ppfd_umol_m2_s,ypfd_umol_m2_s,epar_umol_m2_s,lux,irradiance_W_m2,r_fr\n");
+		}
 		for (iy = 0; iy < t->ny; iy++) {
 			for (ix = 0; ix < t->nx; ix++) {
 				const int ic = (iy * t->nx) + ix;
 				const double *E = TCELL(t, ic, nl);
 				const double fr = calc_bandppf(p, E, 725.0, 735.0);
-				fprintf(fp, "%d,%d,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
-					ix, iy,
-					t->x0 + ((ix + 0.5) * dx), t->y0 + ((iy + 0.5) * dy),
-					calc_ppfd(p, E), calc_ypfd(p, E), calc_epar(p, E),
-					calc_lux(p, E), calc_irradiance(p, E),
-					(fr > 0.0) ? (calc_bandppf(p, E, 655.0, 665.0) / fr) : 0.0);
+				const double rfr = (fr > 0.0) ? (calc_bandppf(p, E, 655.0, 665.0) / fr) : 0.0;
+				if (t->sensor) {
+					const double fu = (ix + 0.5) / t->nx, fv = (iy + 0.5) / t->ny;
+					const vec3_t c = v_add(t->org, v_add(v_scale(t->eu, fu), v_scale(t->ev, fv)));
+					fprintf(fp, "%d,%d,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
+						ix, iy, fu * v_norm(t->eu), fv * v_norm(t->ev),
+						calc_ppfd(p, E), calc_ypfd(p, E), calc_epar(p, E),
+						calc_lux(p, E), calc_irradiance(p, E), rfr, c.x, c.y, c.z);
+				}
+				else {
+					fprintf(fp, "%d,%d,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
+						ix, iy,
+						t->x0 + ((ix + 0.5) * dx), t->y0 + ((iy + 0.5) * dy),
+						calc_ppfd(p, E), calc_ypfd(p, E), calc_epar(p, E),
+						calc_lux(p, E), calc_irradiance(p, E), rfr);
+				}
 			}
 		}
 		fclose(fp);

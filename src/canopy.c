@@ -447,15 +447,25 @@ void canopy_field(ppfd_t *p, int il, const double *B, double *aout, double *sout
 }
 
 /*
-群落内部の高さ z における上向き受光面の拡散放射照度 [W/m²]。
-層界面の下向き流束を線形内挿する (測定面は上向きの量子センサ)。
+群落内部の高さ z で、単位法線の z 成分が nz の受光面が受ける拡散放射照度
+[W/m²]。層界面の流束を線形内挿する。
+
+二流近似では各半球の放射輝度が一様 (下向き L↓ = F↓/π、上向き L↑ = F↑/π)
+なので、天頂から角 β だけ傾いた面 (cos β = nz) が見る上半球の割合は
+(1 + cos β)/2、下半球は (1 - cos β)/2 になる :
+
+    E = F↓ (1 + nz)/2 + F↑ (1 - nz)/2
+
+上向き (nz = 1) なら F↓、下向きなら F↑、鉛直なら両者の平均。nz = 1 では
+係数が厳密に 1 と 0 なので、従来の上向きの値と 1 ビットも変わらない。
 */
-double canopy_interior(const ppfd_t *p, int il, double z)
+double canopy_interior(const ppfd_t *p, int il, double z, double nz)
 {
 	const canopy_t *c = &p->canopy;
 	const int nl = c->nlayer;
 	const double *fdn = &p->cfdn[(size_t)il * (nl + 1)];
-	double f;
+	const double *fup = &p->cfup[(size_t)il * (nl + 1)];
+	double f, dn, up;
 	int    m;
 
 	if ((z >= c->ztop) || (z <= c->zbot)) return 0.0;
@@ -464,7 +474,9 @@ double canopy_interior(const ppfd_t *p, int il, double z)
 	if (m < 0) m = 0;
 	if (m > nl - 1) m = nl - 1;
 	f -= m;
-	return (fdn[m] * (1.0 - f)) + (fdn[m + 1] * f);
+	dn = (fdn[m] * (1.0 - f)) + (fdn[m + 1] * f);
+	up = (fup[m] * (1.0 - f)) + (fup[m + 1] * f);
+	return (dn * (0.5 * (1.0 + nz))) + (up * (0.5 * (1.0 - nz)));
 }
 
 /*

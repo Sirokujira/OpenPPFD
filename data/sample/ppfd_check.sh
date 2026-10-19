@@ -71,6 +71,11 @@ sumval() {
 	awk -F, -v c="$1" 'NR == 2 {print $c; exit}' "$WORK/ppfd_summary.csv"
 }
 
+# sumrow <面の名前> <列番号> : ppfd_summary.csv の指定の面の値
+sumrow() {
+	awk -F, -v n="$1" -v c="$2" 'NR > 1 && $1 == n {print $c; exit}' "$WORK/ppfd_summary.csv"
+}
+
 # maxdiff <map1.csv> <map2.csv> [1] : PPFD 列の最大相対差。
 # 第 3 引数 1 で 2 番目の表の (ix, iy) を入れ替えて比較する (90 度回転の判定用)。
 maxdiff() {
@@ -494,6 +499,174 @@ cp "$WORK/ppfd_map_s.csv" "$WORK/map_m5.csv"
 # 完全鏡面の 2 面 = x と z の両方で 2 倍にした幾何 (角の変換も 1 対 1)
 run mirror5ref.ppfd
 chkabs "twomirror: folded equivalence" "$(maxdiff map_m5.csv ppfd_map_s.csv)" 1e-6
+
+echo
+echo "== (q) specular walls + occluders (folded shadow test) =="
+# 鏡像への直線は箱型ビリヤードの展開なので、実経路は展開空間に並んだ
+# チャンバの複製を順に通る。遮蔽判定は「通りうる複製それぞれにある棚板の
+# 鏡像」と照合すれば厳密になる (occ_blocked_img)。mirror6.ppfd の板は
+# 反射光の 1 本目の脚だけを遮り、鏡像への直線は実在の板に当たらないので、
+# 素の直線判定では影が消える (+18.7%)。
+# (1) 板と床を黒くした変種 : 残るのは実光源の 1 本だけ
+sed -e 's/^wall = zmin white/wall = zmin black/' -e 's/ white div 4 4/ black div 4 4/' \
+    -e 's/^target      = s 0.1 12 6/target      = s 0.1 1 1/' \
+	"$SRC/mirror6.ppfd" > "$WORK/mirror6d.ppfd"
+run mirror6d.ppfd
+chk "specocc: reflected leg shadowed" "$(sumval 5)" 0.5267227 1e-6
+# (2) 板にも拡散反射させて収支と二重箱等価 (板の鏡像を実在の 2 枚目として置く)。
+# 遮蔽物があるときの収支は影の境界の求積で 1e-4 台が下限 (形態係数の問題ではない)
+run mirror6.ppfd
+chkabs "specocc: closure" "$(logval 'closure error')" 1e-3
+cp "$WORK/ppfd_map_s.csv" "$WORK/map_m6.csv"
+run mirror6ref.ppfd
+chkabs "specocc: folded equivalence" "$(maxdiff map_m6.csv ppfd_map_s.csv)" 1e-6
+# (3) 鏡面 2 面 (xmax, zmax) + 板 : 角の鏡像への直線は 4 つの複製を通るので、
+# 参照解は 2 x 1 x 2 の箱に板 4 枚。mirror5 / mirror5ref に板を足して作る。
+# 板の高さ 0.61 はかすめにくい配置として選んだもの。下の 0.57 の判定も参照。
+sed 's/^wall = zmax mirror/wall = zmax mirror\noccluder = plate 0.7 0.9 0.3 0.7 0.61 0.61 white div 4 4/' \
+	"$SRC/mirror5.ppfd" > "$WORK/mirror5o.ppfd"
+sed 's/^wall = ymin white/wall = ymin white\noccluder = p00 0.7 0.9 0.3 0.7 0.61 0.61 white div 4 4\noccluder = p10 1.1 1.3 0.3 0.7 0.61 0.61 white div 4 4\noccluder = p01 0.7 0.9 0.3 0.7 1.39 1.39 white div 4 4\noccluder = p11 1.1 1.3 0.3 0.7 1.39 1.39 white div 4 4/' \
+	"$SRC/mirror5ref.ppfd" > "$WORK/mirror5oref.ppfd"
+run mirror5o.ppfd
+chkabs "specocc2: closure" "$(logval 'closure error')" 1e-3
+cp "$WORK/ppfd_map_s.csv" "$WORK/map_m5o.csv"
+run mirror5oref.ppfd
+chkabs "specocc2: folded equivalence" "$(maxdiff map_m5o.csv ppfd_map_s.csv)" 1e-6
+# 板の高さ 0.57 : 直接光の影の境界判定を「5% 内側の 4 隅 + 中心」の 5 点
+# (有理数の位置) でしていたころは、判定点からの光線が t = 0.4 でちょうど板の辺
+# y = 0.3 に乗り、参照解の鏡映の複製どうしで細分の有無が割れて 3.5e-5 ずれた。
+# 判定を粗い求積の Gauss 点 (√(3/5) を含む無理数の位置) で行うようにしてから 0。
+sed 's/ 0\.61 0\.61 / 0.57 0.57 /' "$WORK/mirror5o.ppfd" > "$WORK/mirror5g.ppfd"
+sed 's/ 0\.61 0\.61 / 0.57 0.57 /g; s/ 1\.39 1\.39 / 1.43 1.43 /g' "$WORK/mirror5oref.ppfd" > "$WORK/mirror5gref.ppfd"
+run mirror5g.ppfd
+cp "$WORK/ppfd_map_s.csv" "$WORK/map_m5g.csv"
+run mirror5gref.ppfd
+chkabs "specocc2: grazing height 0.57" "$(maxdiff map_m5g.csv ppfd_map_s.csv)" 1e-6
+
+echo
+echo "== (r) tilted panels (arbitrary parallelogram plates) =="
+# tiltpanel.ppfd : 45 度傾けた黒い板。床の 3 点の直接光 (壁も黒なので間接光なし)
+run tiltpanel.ppfd
+# a : 光線が板の中心を貫く -> 厳密に 0
+chkabs "panel: shadowed point" "$(sumval 5)" 0
+# b : 光線は板の外接箱を通り抜けるが板の平面とは板の外で交わる -> 遮られない。
+#     箱として扱う実装ならここが 0 になる
+chk "panel: through bounding box" "$(awk -F, 'NR == 3 {print $5; exit}' "$WORK/ppfd_summary.csv")" 0.4127722 1e-6
+chk "panel: clear point" "$(awk -F, 'NR == 4 {print $5; exit}' "$WORK/ppfd_summary.csv")" 0.5267227 1e-6
+# 白い壁 (rho 0.5) と白い板 : 閉キャビティの収支。遮蔽物の影の境界は可視率の
+# 標本化なので 1e-3 台が下限 (同じ位置の軸並行の板でも同じ桁 : 3.7e-4)
+sed -e 's/^wall = all black/wall = all white/' -e 's/ black div 4 4/ white div 4 4/' \
+    -e 's/^material = white gray 0.8/material = white gray 0.5/' \
+    -e '/^target/d' -e 's/^photoperiod/target = floor 0.1 12 12\nphotoperiod/' \
+	"$SRC/tiltpanel.ppfd" > "$WORK/panelw.ppfd"
+run panelw.ppfd
+chkabs "panel: closure (rho 0.5)" "$(logval 'closure error')" 2e-3
+cp "$WORK/ppfd_map_floor.csv" "$WORK/map_pw.csv"
+# 板を x = y で鏡映すると (光源も箱も x = y について対称) 床の分布は転置になる
+sed 's/^panel = tilt 0.3 0.3 0.4  0.5 0.3 0.6  0.3 0.7 0.4/panel = tilt 0.3 0.3 0.4  0.3 0.5 0.6  0.7 0.3 0.4/' \
+	"$WORK/panelw.ppfd" > "$WORK/panelwt.ppfd"
+run panelwt.ppfd
+chkabs "panel: x=y mirror -> transpose" "$(maxdiff map_pw.csv ppfd_map_floor.csv 1)" 1e-9
+# 水平な panel は厚さ 0 の occluder と同じ (mirror6.ppfd の板を置き換え。鏡面の
+# 折り返し判定 occ_blocked_img の板の側も通る)
+run mirror6.ppfd
+cp "$WORK/ppfd_map_s.csv" "$WORK/map_m6b.csv"
+sed 's/^occluder = plate 0.7 0.9 0.3 0.7 0.57 0.57 white div 4 4/panel = plate 0.7 0.3 0.57  0.9 0.3 0.57  0.7 0.7 0.57 white div 4 4/' \
+	"$SRC/mirror6.ppfd" > "$WORK/mirror6p.ppfd"
+run mirror6p.ppfd
+chkabs "panel: horizontal == occluder" "$(maxdiff map_m6b.csv ppfd_map_s.csv)" 1e-9
+# 同じ板を 2 通りに書いても (panel / occluder) 結果がそろうこと。ちょうど中間の
+# 高さ (z = 0.5) の板は、有理数の格子の標本だと床と天井の標本を結ぶ光線の族が
+# 板の辺にまとめて乗り、交差判定の丸めの違いで可視率が跳んでいた (7.2e-4)。
+# 標本位置を無理数 (受光側 : 黄金比、放射側 : √2) にずらしてからは 1e-5 台。
+sed 's/^panel = tilt .*/panel = tilt 0.3 0.3 0.5  0.5 0.3 0.5  0.3 0.7 0.5  white div 4 4/' \
+	"$WORK/panelw.ppfd" > "$WORK/panelmid.ppfd"
+sed 's/^panel = tilt .*/occluder = tilt 0.3 0.5 0.3 0.7 0.5 0.5 white div 4 4/' \
+	"$WORK/panelw.ppfd" > "$WORK/occmid.ppfd"
+run panelmid.ppfd
+cp "$WORK/ppfd_map_floor.csv" "$WORK/map_pmid.csv"
+run occmid.ppfd
+chkabs "visibility: panel == occluder" "$(maxdiff map_pmid.csv ppfd_map_floor.csv)" 1e-4
+chkabs "visibility: mid-height closure" "$(logval 'closure error')" 1e-3
+# 鏡面 + 斜めの板 : 板の鏡像 (x -> 2 - x) を実在の 2 枚目として置いた参照解と比べる
+sed 's/^occluder = plate .*/panel = tilt 0.71 0.33 0.52  0.88 0.33 0.67  0.71 0.69 0.52  white div 4 4/' \
+	"$SRC/mirror6.ppfd" > "$WORK/mirror6t.ppfd"
+sed -e 's/^occluder = plate .*/panel = tilt 0.71 0.33 0.52  0.88 0.33 0.67  0.71 0.69 0.52  white div 4 4/' \
+    -e 's/^occluder = plate2 .*/panel = tilt2 1.29 0.33 0.52  1.12 0.33 0.67  1.29 0.69 0.52  white div 4 4/' \
+	"$SRC/mirror6ref.ppfd" > "$WORK/mirror6tref.ppfd"
+run mirror6t.ppfd
+chkabs "panel: specular closure" "$(logval 'closure error')" 1e-3
+cp "$WORK/ppfd_map_s.csv" "$WORK/map_m6t.csv"
+run mirror6tref.ppfd
+chkabs "panel: specular folded equiv." "$(maxdiff map_m6t.csv ppfd_map_s.csv)" 1e-6
+# 退化した板 (3 隅が一直線) とチャンバからはみ出す板は入力段で弾かれる
+sed 's/^panel = tilt .*/panel = tilt 0.3 0.3 0.4  0.5 0.3 0.6  0.7 0.3 0.8  black/' "$SRC/tiltpanel.ppfd" > "$WORK/paneldeg.ppfd"
+if (cd "$WORK" && "$OPPFD" paneldeg.ppfd > /dev/null 2>&1); then
+	echo "panel: degenerate rejected -> NG (accepted a collinear panel)" >&2
+	status=1
+else
+	echo "panel: degenerate rejected -> OK"
+fi
+sed 's/^panel = tilt .*/panel = tilt 0.3 0.3 0.4  0.5 0.3 0.6  0.3 1.2 0.4  black/' "$SRC/tiltpanel.ppfd" > "$WORK/panelout.ppfd"
+if (cd "$WORK" && "$OPPFD" panelout.ppfd > /dev/null 2>&1); then
+	echo "panel: outside chamber rejected -> NG (accepted a panel outside the box)" >&2
+	status=1
+else
+	echo "panel: outside chamber rejected -> OK"
+fi
+# 鏡面を運ぶのは壁だけ。棚板・板に鏡面材料を付けると ρs が帳簿から消える
+# (-1.4%) ので入力段で弾かれる (遮蔽物にもともとあった穴を同時に塞いだ)
+sed 's/^occluder = plate 0.7 0.9 0.3 0.7 0.57 0.57 white div 4 4/occluder = plate 0.7 0.9 0.3 0.7 0.57 0.57 mirror div 4 4/' \
+	"$SRC/mirror6.ppfd" > "$WORK/occspec.ppfd"
+if (cd "$WORK" && "$OPPFD" occspec.ppfd > /dev/null 2>&1); then
+	echo "plate: specular material rejected -> NG (accepted a specular occluder)" >&2
+	status=1
+else
+	echo "plate: specular material rejected -> OK"
+fi
+
+echo "== (s) oriented sensors (vertical / downward measuring planes) =="
+# sensor.ppfd : 黒いチャンバの中心の点光源。どの向きの面も直接光の解析解
+#   E = Phi/(4 pi) (n . (S - x)) / d^3   (n . (S - x) > 0 のときだけ)
+run sensor.ppfd
+chk "sensor: vertical (-x)"      "$(sumrow wall 5)" 1.6510888 1e-6
+chkabs "sensor: downward, below" "$(sumrow down 5)" 0
+chk "sensor: downward, above"    "$(sumrow ceil 5)" 4.1021631 1e-6
+# 同じ水平面を target と sensor で書いても分布がそろう。rack.ppfd (白壁・
+# 棚板・群落) に leafscatter を入れ、群落の内部 (z = 0.06) で比べる
+sed 's/^target = canopybase 0.06 25 13/target = canopybase 0.06 25 13\nsensor = cb2 0 0 0.06  1.2 0 0.06  0 0.6 0.06  25 13\nleafscatter = on/' \
+	"$SRC/rack.ppfd" > "$WORK/rack_sensor.ppfd"
+run rack_sensor.ppfd
+chkabs "sensor: == target (in canopy)" "$(maxdiff ppfd_map_canopybase.csv ppfd_map_cb2.csv)" 1e-12
+# 群落の内部の傾いた面 : 二流近似では各半球の放射輝度が一様なので
+#   E = F_down (1 + nz)/2 + F_up (1 - nz)/2
+# 光源を 3 つの面すべての平面上に置き (直接光は cos = 0 で 0)、壁を黒く
+# すると、残るのは群落の拡散場だけ : 上向き = F_down、下向き = F_up、
+# 鉛直 = その平均。要約 CSV は 6 桁なので 2e-6 で判定する
+# (F_down だけを使う誤った実装なら 1e-3 ずれる)
+sed -e 's/^material = black gray 0.0/material = black gray 0.0\nmaterial = leaf  gray 0.4 0.4/' \
+    -e 's/^led = 0.5 0.5 0.5 1.0 na555 iso/led = 0.5 0.2 0.5 1.0 na555 iso\ncanopy = 0.7 0.3 2.0 0.5 leaf\nleafscatter = on/' \
+    -e '/^sensor = /d' \
+    -e 's/^target = floor 0.1 1 1/target = floor 0.1 1 1\nsensor = up   0.4 0.4 0.5  0.6 0.4 0.5  0.4 0.6 0.5  1 1\nsensor = dn   0.4 0.4 0.5  0.4 0.6 0.5  0.6 0.4 0.5  1 1\nsensor = vert 0.5 0.4 0.4  0.5 0.4 0.6  0.5 0.6 0.4  1 1/' \
+	"$SRC/sensor.ppfd" > "$WORK/sensor_canopy.ppfd"
+run sensor_canopy.ppfd
+chk "sensor: tilted in canopy" "$(sumrow vert 5)" \
+	"$(awk -v u="$(sumrow up 5)" -v d="$(sumrow dn 5)" 'BEGIN {printf "%.9g", (u + d) / 2}')" 2e-6
+# はみ出す面・退化した面は入力段で弾かれる
+sed 's/^sensor = wall .*/sensor = wall  0.9 0.4 0.2  1.3 0.4 0.4  0.9 0.6 0.2  1 1/' "$SRC/sensor.ppfd" > "$WORK/sensorout.ppfd"
+if (cd "$WORK" && "$OPPFD" sensorout.ppfd > /dev/null 2>&1); then
+	echo "sensor: outside chamber rejected -> NG (accepted a sensor outside the box)" >&2
+	status=1
+else
+	echo "sensor: outside chamber rejected -> OK"
+fi
+sed 's/^sensor = wall .*/sensor = wall  0.9 0.4 0.2  0.9 0.4 0.4  0.9 0.4 0.6  1 1/' "$SRC/sensor.ppfd" > "$WORK/sensordeg.ppfd"
+if (cd "$WORK" && "$OPPFD" sensordeg.ppfd > /dev/null 2>&1); then
+	echo "sensor: degenerate rejected -> NG (accepted a collinear sensor)" >&2
+	status=1
+else
+	echo "sensor: degenerate rejected -> OK"
+fi
 
 echo
 if [ "$status" -ne 0 ]; then

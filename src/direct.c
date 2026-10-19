@@ -49,9 +49,9 @@ rho_s * Phi を持ち、その直線が折り返し経路をそのまま表す�
 面の鏡映は可換なので、並びで数えると同じ像を何度も数えてしまう
 (xmax→zmax と zmax→xmax は同じ点)。
 
-【制限】鏡像からの直線は折り返した経路を表すので、遮蔽物があると遮蔽
-判定が合わない。両立は入力段で明示的に弾く (群落の経路長は canopy_path
-が折り返して測るので併用できる)。
+鏡像からの直線は折り返した経路を表すので、遮蔽判定も折り返して行う
+(occ_blocked_img : 通りうるチャンバの複製それぞれにある棚板の鏡像と照合)。
+群落の経路長も canopy_path が折り返して測る。
 */
 
 /* 軸 a の展開指数 n に対応する重み (交差する面の Π ρs)。0 なら経路なし */
@@ -71,8 +71,8 @@ static double axis_weight(const double *rs, int a, int n)
 	return w;
 }
 
-/* 展開指数 n における軸 a の座標写像 (箱の長さ L) */
-static double axis_map(double c, double L, int n)
+/* 展開指数 n における軸 a の座標写像 (箱の長さ L)。遮蔽判定 (geometry.c) も使う */
+double spec_axis_map(double c, double L, int n)
 {
 	/* C の % は負数で符号が残るので、奇数判定はそのまま使える */
 	return ((n % 2) == 0) ? (c + ((double)n * L)) : (((double)(n + 1) * L) - c);
@@ -128,9 +128,9 @@ int spec_transforms(const ppfd_t *p, strans_t *tr, int maxn)
 /* 変換を点に適用する */
 vec3_t spec_apply(const ppfd_t *p, const strans_t *t, vec3_t a)
 {
-	a.x = axis_map(a.x, p->Lx, t->n[0]);
-	a.y = axis_map(a.y, p->Ly, t->n[1]);
-	a.z = axis_map(a.z, p->Lz, t->n[2]);
+	a.x = spec_axis_map(a.x, p->Lx, t->n[0]);
+	a.y = spec_axis_map(a.y, p->Ly, t->n[1]);
+	a.z = spec_axis_map(a.z, p->Lz, t->n[2]);
 	return a;
 }
 
@@ -160,7 +160,7 @@ int spec_on_mirror(const ppfd_t *p, const strans_t *t, const patch_t *q)
 	if (t->n[a] == 0) return 0;
 	L = (a == 0) ? p->Lx : ((a == 1) ? p->Ly : p->Lz);
 	c = (a == 0) ? q->p[0].x : ((a == 1) ? q->p[0].y : q->p[0].z);
-	return (axis_map(c, L, t->n[a]) == c);
+	return (spec_axis_map(c, L, t->n[a]) == c);
 }
 
 /*
@@ -212,6 +212,9 @@ void setup_images(ppfd_t *p)
 			im.ay  = spec_apply_dir(&tr[it], im.ay);
 			im.cx  = spec_apply_dir(&tr[it], im.cx);
 			im.cy  = spec_apply_dir(&tr[it], im.cy);
+			im.img[0] = tr[it].n[0];
+			im.img[1] = tr[it].n[1];
+			im.img[2] = tr[it].n[2];
 			p->emit[p->nemit++] = im;
 			p->nimage++;
 		}
@@ -223,7 +226,8 @@ void setup_images(ppfd_t *p)
 点 x (単位法線 n) における全光源からの直接分光放射照度 [W/m²] を
 E[0..nlam-1] に加算する (E は呼び出し側でゼロ初期化しておく)。
 */
-void direct_point_ex(const ppfd_t *p, vec3_t x, vec3_t n, double *E, double *dep, double *seg)
+void direct_point_ex(const ppfd_t *p, vec3_t x, vec3_t n, double *E, double *dep, double *seg,
+                     unsigned char *vflag)
 {
 	int    ie, i;
 	double *acc = NULL;
@@ -260,7 +264,11 @@ void direct_point_ex(const ppfd_t *p, vec3_t x, vec3_t n, double *E, double *dep
 
 				cr = -v_dot(n, r) / d;          /* 受光面が光源を向く向き */
 				if (cr <= 0.0) continue;
-				if (occ_blocked(p, sp, x)) continue;   /* 棚板等の影 */
+				if (occ_blocked_img(p, sp, x, e->img)) {      /* 棚板等の影 (鏡像は折り返して判定) */
+					if (vflag != NULL) vflag[ie] |= 2;
+					continue;
+				}
+				if (vflag != NULL) vflag[ie] |= 1;
 
 				if (e->idist >= 0) {
 					/* 実測配光 : Î は ∫Î dΩ = 1 に正規化済みなので I = Φ Î */
@@ -318,7 +326,7 @@ void direct_point_ex(const ppfd_t *p, vec3_t x, vec3_t n, double *E, double *dep
 
 void direct_point(const ppfd_t *p, vec3_t x, vec3_t n, double *E)
 {
-	direct_point_ex(p, x, n, E, NULL, NULL);
+	direct_point_ex(p, x, n, E, NULL, NULL, NULL);
 }
 
 /*
@@ -340,39 +348,49 @@ O(1/msub) まで落ちる (エネルギー収支の closure error に効く)。�
 */
 
 /*
-影の境界がまたぐパッチか (光源からパッチの 5 点への遮蔽判定が割れるか)。
-面光源は中心で代表させる (細分の要否の判定に使うだけなので粗くてよい)。
-
-判定点は角そのものではなく少し内側に取る。棚板の面にちょうど接する壁
-パッチは、角が遮蔽物の平面上に乗るせいで「角だけ遮られない」と出るが、
-内部は一様に影なので細分しても無駄になる (2 段ラックでは側壁の 64 枚が
-これに当たり、直接光の計算時間が数倍になっていた)。
+パッチ q の面積平均の直接放射照度を msub x msub の小矩形 x 3 x 3 点の
+Gauss-Legendre で求積して E[] に、群落への預け入れを dp[] に加算する。
+vflag が非 NULL なら、光源ごとに「どこかの求積点に届いた (1)」「どこかの
+求積点で遮られた (2)」を立てる (影の境界の判定に使う)。
 */
-static int patch_on_shadow_edge(const ppfd_t *p, const patch_t *q)
+static void patch_quadrature(const ppfd_t *p, const patch_t *q, int msub, double *E, double *dp,
+                             double *tmp, double *dtmp, double *seg, unsigned char *vflag)
 {
-	const double t = 0.05;          /* 内側への寄せ量 (パッチ辺の割合) */
+	static const double gx[3] = {
+		0.5 * (1.0 - 0.7745966692414834), 0.5, 0.5 * (1.0 + 0.7745966692414834)
+	};
+	static const double gw[3] = {
+		0.5 * 0.5555555555555556, 0.5 * 0.8888888888888888, 0.5 * 0.5555555555555556
+	};
+	const int ns = p->nspec;
+	const int nl = p->canopy.nlayer;
 	const vec3_t eu = v_sub(q->p[1], q->p[0]);
 	const vec3_t ev = v_sub(q->p[3], q->p[0]);
-	vec3_t xs[5];
-	int    ie, k;
+	const double h = 1.0 / msub;
+	int su, sv, gu, gv, i;
 
-	if (p->nocc == 0) return 0;
+	for (sv = 0; sv < msub; sv++) {
+		for (su = 0; su < msub; su++) {
+			for (gv = 0; gv < 3; gv++) {
+				for (gu = 0; gu < 3; gu++) {
+					const double u = (su + gx[gu]) * h;
+					const double v = (sv + gx[gv]) * h;
+					const double w = gw[gu] * gw[gv] * h * h;
+					const vec3_t x = v_add(q->p[0], v_add(v_scale(eu, u), v_scale(ev, v)));
 
-	for (k = 0; k < 4; k++) {
-		const double u = ((k == 0) || (k == 3)) ? t : (1.0 - t);
-		const double v = (k < 2) ? t : (1.0 - t);
-		xs[k] = v_add(q->p[0], v_add(v_scale(eu, u), v_scale(ev, v)));
-	}
-	xs[4] = q->c;
-
-	for (ie = 0; ie < p->nemit; ie++) {
-		int nb = 0;
-		for (k = 0; k < 5; k++) {
-			nb += occ_blocked(p, p->emit[ie].pos, xs[k]);
+					for (i = 0; i < p->nlam; i++) tmp[i] = 0.0;
+					if (dtmp != NULL) {
+						for (i = 0; i < ns * nl; i++) dtmp[i] = 0.0;
+					}
+					direct_point_ex(p, x, q->n, tmp, dtmp, seg, vflag);
+					for (i = 0; i < p->nlam; i++) E[i] += w * tmp[i];
+					if (dtmp != NULL) {
+						for (i = 0; i < ns * nl; i++) dp[i] += w * dtmp[i];
+					}
+				}
+			}
 		}
-		if ((nb > 0) && (nb < 5)) return 1;
 	}
-	return 0;
 }
 
 void direct_patch(ppfd_t *p)
@@ -401,59 +419,53 @@ void direct_patch(ppfd_t *p)
 #endif
 	for (ip = 0; ip < n; ip++) {
 		const patch_t *q = &p->patch[ip];
-		const vec3_t eu = v_sub(q->p[1], q->p[0]);
-		const vec3_t ev = v_sub(q->p[3], q->p[0]);
 		double *E = &p->Ed[(size_t)ip * p->nlam];
 		double *tmp = (double *)xcalloc((size_t)p->nlam, sizeof(double));
-		const int edge = patch_on_shadow_edge(p, q);
-		const int msub_i = edge ? ((msub * 8 < 32) ? (msub * 8) : 32) : msub;
-		const double h = 1.0 / msub_i;
 		double *dp = (cd != NULL) ? &cd[(size_t)ip * ns * nl] : NULL;
 		double *dtmp = (cd != NULL) ? (double *)xcalloc((size_t)ns * nl, sizeof(double)) : NULL;
 		double *seg = (cd != NULL) ? (double *)xmalloc((size_t)nl * sizeof(double)) : NULL;
-		int su, sv, gu, gv, i;
+		unsigned char *vflag = occ_any(p) ? (unsigned char *)xcalloc((size_t)p->nemit, 1) : NULL;
+		int edge = 0, ie, i;
 
-		nedge += edge;
 		/*
 		群落散乱が有効なら、このパッチへ向かう光束が層へ預ける分を集める。
 		パッチ i に届くはずの放射束は A_i * (減衰前の面積平均放射照度) なので、
 		面積平均の求積重みをそのまま使い、最後に A_i を掛ければよい。
 		Σ_m 預け入れ + 透過 = 1 が望遠鏡和で厳密に成り立つ。
 		*/
-		for (sv = 0; sv < msub_i; sv++) {
-			for (su = 0; su < msub_i; su++) {
-				for (gv = 0; gv < 3; gv++) {
-					for (gu = 0; gu < 3; gu++) {
-						static const double gx[3] = {
-							0.5 * (1.0 - 0.7745966692414834), 0.5, 0.5 * (1.0 + 0.7745966692414834)
-						};
-						static const double gw[3] = {
-							0.5 * 0.5555555555555556, 0.5 * 0.8888888888888888, 0.5 * 0.5555555555555556
-						};
-						const double u = (su + gx[gu]) * h;
-						const double v = (sv + gx[gv]) * h;
-						const double w = gw[gu] * gw[gv] * h * h;
-						const vec3_t x = v_add(q->p[0], v_add(v_scale(eu, u), v_scale(ev, v)));
+		patch_quadrature(p, q, msub, E, dp, tmp, dtmp, seg, vflag);
 
-						for (i = 0; i < p->nlam; i++) tmp[i] = 0.0;
-						if (dtmp != NULL) {
-							for (i = 0; i < ns * nl; i++) dtmp[i] = 0.0;
-						}
-						direct_point_ex(p, x, q->n, tmp, dtmp, seg);
-						for (i = 0; i < p->nlam; i++) E[i] += w * tmp[i];
-						if (dtmp != NULL) {
-							for (i = 0; i < ns * nl; i++) dp[i] += w * dtmp[i];
-						}
-					}
-				}
+		/*
+		影の境界がパッチをまたぐか : 粗い求積の点で、届いた点と遮られた点が
+		両方ある光源があれば細分して求積し直す。判定点は求積点そのもの
+		(Gauss 点は √(3/5) を含む無理数の位置) なので、小数で書いた棚板の辺に
+		光線の族がまとめて乗って判定が丸めで割れることがない。セルの中心に
+		ついて対称なので、鏡映したパッチでも同じ点の集合になる。
+		以前の「5% 内側の 4 隅 + 中心」の 5 点 (有理数の位置) は、光線が板の辺に
+		ちょうど乗ると鏡映の複製どうしで判定が割れていた。
+		*/
+		if (vflag != NULL) {
+			for (ie = 0; ie < p->nemit; ie++) {
+				if (vflag[ie] == 3) { edge = 1; break; }
 			}
 		}
+		if (edge) {
+			const int msub_f = (msub * 8 < 32) ? (msub * 8) : 32;
+			for (i = 0; i < p->nlam; i++) E[i] = 0.0;
+			if (dp != NULL) {
+				for (i = 0; i < ns * nl; i++) dp[i] = 0.0;
+			}
+			patch_quadrature(p, q, msub_f, E, dp, tmp, dtmp, seg, NULL);
+		}
+		nedge += edge;
+
 		if (dp != NULL) {
 			/* 面積平均 -> 放射束 [W] */
 			for (i = 0; i < ns * nl; i++) dp[i] *= q->area;
 			free(dtmp);
 			free(seg);
 		}
+		free(vflag);
 		free(tmp);
 	}
 
