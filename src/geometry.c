@@ -317,6 +317,76 @@ int occ_blocked_img(const ppfd_t *p, vec3_t a, vec3_t b, const int *n)
 	return 0;
 }
 
+/* 区間 [a0,a1] と [b0,b1] が重なるか (端で接するのも重なりに数える) */
+static int span_overlap(double a0, double a1, double b0, double b1)
+{
+	const double e = 1e-12;
+	return (a0 <= (b1 + e)) && (b0 <= (a1 + e));
+}
+
+/*
+軸並行の箱 [lo, hi] がどれかの遮蔽物 (棚板 / 斜めの板。n が非 NULL なら
+通りうる複製それぞれにあるその鏡像) と重なるか。
+
+可視率の推定で「1 本も当たりえない」ことを幾何で先に確定させるための判定。
+保守的 (重なっても実際には当たらないことがある) でよい : 重なると判定
+された対は全光線で数えるので、当たらなければ厳密に 1 が返る。
+*/
+int occ_aabb_overlap(const ppfd_t *p, vec3_t lo, vec3_t hi, const int *n)
+{
+	int m0, m1, m2, j0, j1, j2, io;
+
+	if (!occ_any(p)) return 0;
+
+	m0 = (n == NULL) ? 0 : ((n[0] < 0) ? -n[0] : n[0]);
+	m1 = (n == NULL) ? 0 : ((n[1] < 0) ? -n[1] : n[1]);
+	m2 = (n == NULL) ? 0 : ((n[2] < 0) ? -n[2] : n[2]);
+	for (j0 = 0; j0 <= m0; j0++) {
+		const int k0 = ((n != NULL) && (n[0] < 0)) ? -j0 : j0;
+		for (j1 = 0; j1 <= m1; j1++) {
+			const int k1 = ((n != NULL) && (n[1] < 0)) ? -j1 : j1;
+			for (j2 = 0; j2 <= m2; j2++) {
+				const int k2 = ((n != NULL) && (n[2] < 0)) ? -j2 : j2;
+				for (io = 0; io < p->nocc; io++) {
+					const occluder_t *o = &p->occ[io];
+					const vec3_t a = map_copy(p, v_make(o->x0, o->y0, o->z0), k0, k1, k2);
+					const vec3_t b = map_copy(p, v_make(o->x1, o->y1, o->z1), k0, k1, k2);
+					if (span_overlap(lo.x, hi.x, (a.x < b.x) ? a.x : b.x, (a.x < b.x) ? b.x : a.x)
+					 && span_overlap(lo.y, hi.y, (a.y < b.y) ? a.y : b.y, (a.y < b.y) ? b.y : a.y)
+					 && span_overlap(lo.z, hi.z, (a.z < b.z) ? a.z : b.z, (a.z < b.z) ? b.z : a.z)) {
+						return 1;
+					}
+				}
+				for (io = 0; io < p->npanel; io++) {
+					const panel_t *pn = &p->panel[io];
+					vec3_t c[4], plo, phi;
+					int    v;
+					c[0] = pn->org;
+					c[1] = v_add(pn->org, pn->eu);
+					c[2] = v_add(c[1], pn->ev);
+					c[3] = v_add(pn->org, pn->ev);
+					for (v = 0; v < 4; v++) c[v] = map_copy(p, c[v], k0, k1, k2);
+					plo = c[0];
+					phi = c[0];
+					for (v = 1; v < 4; v++) {
+						if (c[v].x < plo.x) plo.x = c[v].x;
+						if (c[v].y < plo.y) plo.y = c[v].y;
+						if (c[v].z < plo.z) plo.z = c[v].z;
+						if (c[v].x > phi.x) phi.x = c[v].x;
+						if (c[v].y > phi.y) phi.y = c[v].y;
+						if (c[v].z > phi.z) phi.z = c[v].z;
+					}
+					if (span_overlap(lo.x, hi.x, plo.x, phi.x) && span_overlap(lo.y, hi.y, plo.y, phi.y)
+					 && span_overlap(lo.z, hi.z, plo.z, phi.z)) {
+						return 1;
+					}
+				}
+			}
+		}
+	}
+	return 0;
+}
+
 void setup_target(ppfd_t *p)
 {
 	int it;

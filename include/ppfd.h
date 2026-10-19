@@ -330,6 +330,7 @@ void    canopy_trans(const ppfd_t *, double, double *);
 int     occ_blocked(const ppfd_t *, vec3_t, vec3_t);
 int     occ_any(const ppfd_t *);
 int     occ_blocked_img(const ppfd_t *, vec3_t, vec3_t, const int *);
+int     occ_aabb_overlap(const ppfd_t *, vec3_t, vec3_t, const int *);
 
 /* formfactor.c */
 double  ff_point_poly(vec3_t, vec3_t, const vec3_t *, int);

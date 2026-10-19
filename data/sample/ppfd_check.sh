@@ -562,6 +562,19 @@ sed 's/^occluder = plate 0.7 0.9 0.3 0.7 0.57 0.57 white div 4 4/panel = plate 0
 	"$SRC/mirror6.ppfd" > "$WORK/mirror6p.ppfd"
 run mirror6p.ppfd
 chkabs "panel: horizontal == occluder" "$(maxdiff map_m6b.csv ppfd_map_s.csv)" 1e-9
+# 同じ板を 2 通りに書いても (panel / occluder) 結果がそろうこと。ちょうど中間の
+# 高さ (z = 0.5) の板は、有理数の格子の標本だと床と天井の標本を結ぶ光線の族が
+# 板の辺にまとめて乗り、交差判定の丸めの違いで可視率が跳んでいた (7.2e-4)。
+# 標本位置を無理数 (受光側 : 黄金比、放射側 : √2) にずらしてからは 1e-5 台。
+sed 's/^panel = tilt .*/panel = tilt 0.3 0.3 0.5  0.5 0.3 0.5  0.3 0.7 0.5  white div 4 4/' \
+	"$WORK/panelw.ppfd" > "$WORK/panelmid.ppfd"
+sed 's/^panel = tilt .*/occluder = tilt 0.3 0.5 0.3 0.7 0.5 0.5 white div 4 4/' \
+	"$WORK/panelw.ppfd" > "$WORK/occmid.ppfd"
+run panelmid.ppfd
+cp "$WORK/ppfd_map_floor.csv" "$WORK/map_pmid.csv"
+run occmid.ppfd
+chkabs "visibility: panel == occluder" "$(maxdiff map_pmid.csv ppfd_map_floor.csv)" 1e-4
+chkabs "visibility: mid-height closure" "$(logval 'closure error')" 1e-3
 # 鏡面 + 斜めの板 : 板の鏡像 (x -> 2 - x) を実在の 2 枚目として置いた参照解と比べる
 sed 's/^occluder = plate .*/panel = tilt 0.71 0.33 0.52  0.88 0.33 0.67  0.71 0.69 0.52  white div 4 4/' \
 	"$SRC/mirror6.ppfd" > "$WORK/mirror6t.ppfd"
