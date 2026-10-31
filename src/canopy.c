@@ -314,6 +314,19 @@ double canopy_deposit(const ppfd_t *p, vec3_t a, vec3_t b, double w, double *dep
 	return tr;
 }
 
+/*
+2 点則で持った経路長 pl = (s1, s2, w1) の透過率 (canopy_plen を参照)。
+s2 = 0 なら群落を通らない (減衰なし)。
+*/
+double plen_trans(const float *pl, double k)
+{
+	const double w1 = pl[2];
+
+	if (pl[1] <= 0.0f) return 1.0;
+	if (w1 >= 1.0) return exp(-k * pl[0]);
+	return (w1 * exp(-k * pl[0])) + ((1.0 - w1) * exp(-k * pl[1]));
+}
+
 /* 群落の上面 (iz = 1) / 下面 (iz = 0) の矩形 */
 static void canopy_plane(const ppfd_t *p, int istop, vec3_t *poly)
 {
@@ -339,6 +352,8 @@ static void canopy_plane(const ppfd_t *p, int istop, vec3_t *poly)
 
   cdepw[i][m] : パッチ i の放射発散度 1 単位あたり、層 m へ預けられる
       放射束 [m²]。A_i Σ_j F_ij (i→j の経路が層 m で落とす割合)。
+      i→j の経路は setup_ff が透過率を作ったのと同じ標本 (canopy_pair_samples)
+      で運ぶので、対ごとに「透過 + 各層への預け入れ = 1」が成り立つ。
       素の遮断 k = G a は波長によらないので、この係数は 1 回作れば足りる。
 */
 void canopy_setup(ppfd_t *p)
@@ -395,14 +410,23 @@ void canopy_setup(ppfd_t *p)
 	for (i = 0; i < n; i++) {
 		double *dep = &p->cdepw[(size_t)i * nl];
 		double *seg = (double *)xmalloc((size_t)nl * sizeof(double));
+		vec3_t *xa = (vec3_t *)xmalloc((size_t)CANOPY_MAXSAMP * sizeof(vec3_t));
+		vec3_t *yb = (vec3_t *)xmalloc((size_t)CANOPY_MAXSAMP * sizeof(vec3_t));
+		double *W  = (double *)xmalloc((size_t)CANOPY_MAXSAMP * sizeof(double));
 		int     j;
 		for (j = 0; j < n; j++) {
 			const double f = p->ff[((size_t)i * n) + j];
+			int ns, a;
 			if (f <= 0.0) continue;
-			canopy_deposit(p, p->patch[i].c, p->patch[j].c, f, dep, seg);
+			/* setup_ff が透過率を作ったのと同じ標本で預ける (対ごとに透過 + 預け入れ = 1) */
+			ns = canopy_pair_samples(p, &p->patch[i], p->patch[j].p, p->patch[j].n, NULL, xa, yb, W);
+			for (a = 0; a < ns; a++) canopy_deposit(p, xa[a], yb[a], f * W[a], dep, seg);
 		}
 		for (j = 0; j < nl; j++) dep[j] *= p->patch[i].area;
 		free(seg);
+		free(xa);
+		free(yb);
+		free(W);
 	}
 	(void)m;
 }

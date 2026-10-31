@@ -668,6 +668,29 @@ else
 	echo "sensor: degenerate rejected -> OK"
 fi
 
+echo "== (t) diffuse transmittance through a canopy slab (2 E3) =="
+# difftrans.ppfd : 側壁 4 面が完全鏡面の平行平板。天井 (白) の拡散光が
+# 黒葉の群落を透過して黒い床に届く割合は 2 E3(tau0) で厳密。
+# パッチ重心どうしの経路長で減衰させた以前の実装は -0.34%〜-1.47%
+run difftrans.ppfd
+chk "difftrans: tau0=1 floor"     "$(logval 'absorbed by walls')" 0.2193839 1e-4
+chk "difftrans: tau0=1 target"    "$(sumval 14)" 0.2193839 1e-4
+sed 's/^material = blackleaf gray 0.0 0.0/material = blackleaf gray 0.3 0.45/' \
+	"$SRC/difftrans.ppfd" > "$WORK/difftrans05.ppfd"
+run difftrans05.ppfd
+chk "difftrans: tau0=0.5 floor"   "$(logval 'absorbed by walls')" 0.4432087 5e-4
+sed 's/^canopy = 0.25 0.05 2.0/canopy = 0.25 0.05 6.0/' \
+	"$SRC/difftrans.ppfd" > "$WORK/difftrans3.ppfd"
+run difftrans3.ppfd
+chk "difftrans: tau0=3 floor"     "$(logval 'absorbed by walls')" 0.0178613 5e-4
+# leafscatter : 層への預け入れを透過率と同じ標本で作るので、白壁の
+# キャビティでも収支が閉じる (canopy.ppfd を白壁・散乱葉にした変種)
+sed -e 's/^material = blackleaf gray 0.0 0.0/material = blackleaf gray 0.25 0.25\nmaterial = white gray 0.7/' \
+    -e 's/^wall     = all black/wall = all white/' \
+    -e 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/canopy.ppfd" > "$WORK/scat_white.ppfd"
+run scat_white.ppfd
+chkabs "difftrans: scatter closure" "$(logval 'closure error')" 1e-5
+
 echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2

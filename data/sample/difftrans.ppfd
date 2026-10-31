@@ -1,0 +1,62 @@
+# 検証 (t) 群落を透過する拡散光 (平行平板の間の拡散透過率 2 E3(tau0))
+#
+# 側壁 4 面を完全鏡面 (rho_s = 1.0) にすると、鏡像の展開でチャンバは
+# 水平方向に無限に広がった平行平板になる。天井を白 (rho_d = 1.0)、床を
+# 黒にし、天井と床の間に黒葉 (omega = 0) の群落スラブ z = 0.05..0.25 m、
+# LAI = 2.0、G = 0.5 (光学的厚さ tau0 = G LAI = 1) を置く。光源は
+# z = 0.3 の上向きの点光源 (beam 10) で、全放射束 1 W が天井に当たる。
+#
+# 天井は一様でない (光源の真上が明るい) 拡散面だが、無限平板では
+# 平行移動の不変性から「床が受け取る総量 = 天井の発散総量 × 拡散透過率」
+# が分布によらず成り立つ。Lambert 面から出た放射の、光学的厚さ tau0 の
+# スラブの拡散透過率は
+#
+#     T = 2 ∫_0^1 exp(-tau0 / mu) mu dmu = 2 E3(tau0)
+#
+#     tau0 = 1   : T = 0.2193839                                     (厳密)
+#     tau0 = 0.5 : T = 0.4432087  (葉を gray 0.3 0.45, omega = 0.75)
+#     tau0 = 3   : T = 0.0178613  (LAI = 6)
+#
+# 床は黒、側壁は吸収 0、天井は吸収 0 なので「壁の吸収 = 床の吸収 = T W」。
+# 床の上の測定面 (群落の下) の平均放射照度も T W/m² になる。
+#
+# ■ なぜパッチ重心どうしの経路長ではいけないか
+# 透過率 exp(-k s) は経路長 s について凸なので、パッチ対の中の経路長の
+# ばらつきを重心どうしの 1 本で代表させると必ず過小評価になる (Jensen)。
+# 以前の実装では -0.62% (tau0 = 1)、-0.34% (0.5)、-1.47% (3) ずれた。
+# いまは経路長の分布を 2 点 Gauss 則に縮めて持つので 1e-4 以下。
+# 3 つの tau0 は経路長の 2 点則を共有し k だけが違うので、k に依存しない
+# 1 組の (s1, s2, w1) で透過率の k 依存性が正しく出ることの検証になる。
+#
+# 鏡像の打ち切り (specbounce = 6) で遠方の斜めの経路が落ちるが、群落の
+# 斜めの経路長が長いので寄与は小さい (tau0 = 0.5 で -3e-5 程度、有限の
+# 段数での残差は -1.6e-4)。
+
+OpenPPFD 1 0
+title = diffuse transmittance of a canopy slab between parallel plates (2 E3)
+
+wavelength = 380 780 5
+chamber    = 1.0 1.0 0.6
+patchdiv   = 6 6
+
+material = black     gray 0.0
+material = white     gray 1.0
+material = mirror    gray 0.0 specular 1.0
+material = blackleaf gray 0.0 0.0
+
+wall = all  mirror
+wall = zmin black
+wall = zmax white
+
+spectrum = na555 mono 555
+
+led = 0.5 0.5 0.3 1.0 na555 beam 10 dir 0 0 1
+
+canopy = 0.25 0.05 2.0 0.5 blackleaf
+
+target      = s 0.02 20 20
+photoperiod = 16
+specbounce  = 6
+quadrature  = 2
+
+end

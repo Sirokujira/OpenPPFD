@@ -6,11 +6,11 @@ radiosity.c
     B_i = ρ_i ( Ed_i + Σ_j F_ij τ_ij B_j )
 
 を Jacobi 反復で解く。B は放射発散度 [W/m²]、Ed は直接放射照度、
-τ_ij は群落スラブによるパッチ間の透過率 (パッチ重心どうしを結ぶ線分で
-評価する近似)。ρ_i < 1 なので反復行列のスペクトル半径は 1 未満、
+τ_ij は群落スラブによるパッチ間の透過率 (対の中の経路長の分布を 2 点
+Gauss 則に縮めたもの。formfactor.c の canopy_plen を参照)。ρ_i < 1 なので反復行列のスペクトル半径は 1 未満、
 必ず収束する。
 
-波長を外側ループにすると τ_ij の exp() が波長ごと 1 回で済み、反復の
+波長を外側ループにすると τ_ij の exp() が波長ごと 1 回 (2 点) で済み、反復の
 内側では行列積だけになる。光源の放射束が 0 のビンは丸ごと飛ばす。
 */
 
@@ -76,8 +76,7 @@ void solve_radiosity(ppfd_t *p)
 			for (i = 0; i < n; i++) {
 				for (j = 0; j < n; j++) {
 					const size_t k = ((size_t)i * n) + j;
-					const double s = p->plen[k];
-					M[k] = (s > 0.0) ? (p->ff[k] * exp(-kext * s)) : p->ff[k];
+					M[k] = p->ff[k] * plen_trans(&p->plen[k * PLEN_N], kext);
 				}
 			}
 			/* 鏡面拡張 : 鏡像経路それぞれの経路長で減衰させて加算する */
@@ -85,15 +84,14 @@ void solve_radiosity(ppfd_t *p)
 				int t;
 				for (t = 0; t < p->nst; t++) {
 					const double *fs = &p->ffs[(size_t)t * n * n];
-					const float  *ps = &p->plens[(size_t)t * n * n];
+					const float  *ps = &p->plens[(size_t)t * n * n * PLEN_N];
 #ifdef _OPENMP
 #pragma omp parallel for private(j) schedule(static)
 #endif
 					for (i = 0; i < n; i++) {
 						for (j = 0; j < n; j++) {
 							const size_t k = ((size_t)i * n) + j;
-							const double s = ps[k];
-							M[k] += (s > 0.0) ? (fs[k] * exp(-kext * s)) : fs[k];
+							M[k] += fs[k] * plen_trans(&ps[k * PLEN_N], kext);
 						}
 					}
 				}

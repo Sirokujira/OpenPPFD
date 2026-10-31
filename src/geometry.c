@@ -535,6 +535,24 @@ double canopy_path(const ppfd_t *p, vec3_t a, vec3_t b)
 	return sum;
 }
 
+/*
+z の範囲 [zlo, zhi] に収まる線分が群落を通りうるか。範囲が箱の外へ出る
+(鏡像への直線で折り返しうる) ときは保守的に 1 を返す。0 なら、その範囲の
+どの線分でも canopy_path は厳密に 0 になる (経路長の標本化を省くための
+判定なので、閉区間で判定して境界に乗る線分も「通りうる」側に入れる)。
+*/
+int canopy_may_cross(const ppfd_t *p, double zlo, double zhi)
+{
+	int j;
+
+	if (!p->canopy.on) return 0;
+	if ((zlo < 0.0) || (zhi > p->Lz)) return 1;
+	for (j = 0; j < p->nslab; j++) {
+		if ((zhi >= p->slab[j].zbot) && (zlo <= p->slab[j].ztop)) return 1;
+	}
+	return 0;
+}
+
 /* 経路長 s [m] に対する群落の分光透過率 tr[0..nlam-1] */
 void canopy_trans(const ppfd_t *p, double s, double *tr)
 {

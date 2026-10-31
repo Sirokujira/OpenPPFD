@@ -65,6 +65,10 @@ static void gather_target(ppfd_t *p)
 				? v_add(t->org, v_add(v_scale(t->eu, (ix + 0.5) / t->nx), v_scale(t->ev, (iy + 0.5) / t->ny)))
 				: v_make(t->x0 + ((ix + 0.5) * dx), t->y0 + ((iy + 0.5) * dy), t->z);
 			double *E = &t->E[(size_t)ic * nl];
+			/* パッチへの経路の標本 (点 -> パッチは最大 4 x 4) と経路長の 2 点則 */
+			vec3_t xa[16], yb[16];
+			double W[16];
+			float  pl[PLEN_N];
 			int ip, il, i2;
 
 			direct_point(p, x, nz, E);
@@ -87,17 +91,21 @@ static void gather_target(ppfd_t *p)
 			for (ip = 0; ip < n; ip++) {
 				const patch_t *q = &p->patch[ip];
 				const double *B = &p->B[(size_t)ip * nl];
-				double f, s;
+				double f;
 				/* パッチの表側から見ているか (遮蔽物の裏面を拾わないため) */
 				if (v_dot(q->n, v_sub(x, q->p[0])) <= 0.0) continue;
 				f = ff_point_poly(x, nz, q->p, 4);
 				if (f <= 0.0) continue;
 				f *= vis_point_patch(p, x, q, NULL, NULL);
 				if (f <= 0.0) continue;
-				s = canopy_path(p, x, q->c);
-				if (s > 0.0) {
+				pl[1] = 0.0f;
+				if (p->canopy.on) {
+					const int ns = canopy_point_samples(p, x, nz, q->p, q->n, NULL, xa, yb, W);
+					canopy_plen(p, ns, xa, yb, W, pl);
+				}
+				if (pl[1] > 0.0f) {
 					for (il = 0; il < nl; il++) {
-						E[il] += B[il] * f * exp(-kext[il] * s);
+						E[il] += B[il] * f * plen_trans(pl, kext[il]);
 					}
 				}
 				else {
@@ -113,7 +121,7 @@ static void gather_target(ppfd_t *p)
 					const patch_t *q = &p->patch[ip];
 					const double *B = &p->B[(size_t)ip * nl];
 					vec3_t q4[4], nj;
-					double f, s;
+					double f;
 					int    v;
 					if (spec_on_mirror(p, &str[i2], q)) continue;
 					for (v = 0; v < 4; v++) q4[v] = spec_apply(p, &str[i2], q->p[v]);
@@ -130,12 +138,16 @@ static void gather_target(ppfd_t *p)
 						f *= vis_point_patch(p, x, &qm, str[i2].n, NULL);
 						if (f <= 0.0) continue;
 					}
-					/* 鏡像重心への直線から実経路の群落内長さを測る
+					/* 鏡像パッチへの直線から実経路の群落内長さを測る
 					   (床・天井の鏡映ぶんは canopy_path が折り返す) */
-					s = canopy_path(p, x, spec_apply(p, &str[i2], q->c));
-					if (s > 0.0) {
+					pl[1] = 0.0f;
+					if (p->canopy.on) {
+						const int ns = canopy_point_samples(p, x, nz, q4, nj, str[i2].n, xa, yb, W);
+						canopy_plen(p, ns, xa, yb, W, pl);
+					}
+					if (pl[1] > 0.0f) {
 						for (il = 0; il < nl; il++) {
-							E[il] += B[il] * f * exp(-kext[il] * s);
+							E[il] += B[il] * f * plen_trans(pl, kext[il]);
 						}
 					}
 					else {

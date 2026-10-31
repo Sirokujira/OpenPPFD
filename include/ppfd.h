@@ -89,6 +89,11 @@ zmax→xmax は同じ点)。鏡映群は軸ごとの無限二面体群の直積�
     n < 0 : min 面から交互に |n| 回
 
 座標は n が偶数なら c + n L、奇数なら (n+1) L - c へ写る。 */
+/* パッチ間の群落内経路長は対ごとに 2 点 Gauss 則 (s1, s2, w1) で持つ
+   (formfactor.c の説明を参照)。標本数の上限は 4x4 x 4x4。 */
+#define PLEN_N         3
+#define CANOPY_MAXSAMP 256
+
 #define MAXSPECT 512                /* 変換数の上限 (超えたらログに出して打ち切る) */
 typedef struct {
 	int     n[3];                   /* 軸ごとの展開指数 */
@@ -234,10 +239,10 @@ typedef struct {
 	int       npatch;
 	patch_t  *patch;
 	double   *ff;                   /* [npatch*npatch] 形態係数 F_ij */
-	float    *plen;                 /* [npatch*npatch] 群落内の経路長 [m] */
+	float    *plen;                 /* [npatch*npatch*PLEN_N] 群落内の経路長の 2 点則 (s1, s2, w1) [m] */
 	int       nst;                  /* 分離保持している鏡面変換の数 (群落併用時のみ非 0) */
 	double   *ffs;                  /* [nst*npatch*npatch] 鏡面拡張の形態係数 */
-	float    *plens;                /* [nst*npatch*npatch] 鏡像経路の群落内経路長 [m] */
+	float    *plens;                /* [nst*npatch*npatch*PLEN_N] 鏡像経路の同上 */
 	double   *Ed;                   /* [npatch*nlam] 直接放射照度 [W/m²] */
 	double   *B;                    /* [npatch*nlam] 放射発散度 [W/m²] */
 	double   *Einc;                 /* [npatch*nlam] 入射放射照度 (直接+間接) */
@@ -325,6 +330,7 @@ void    canopy_setup(ppfd_t *);
 void    canopy_field(ppfd_t *, int, const double *, double *, double *);
 double  canopy_interior(const ppfd_t *, int, double, double);
 double  canopy_deposit(const ppfd_t *, vec3_t, vec3_t, double, double *, double *);
+double  plen_trans(const float *, double);
 void    canopy_column(const ppfd_t *, double, const double *,
                       double *, double *, double *, double *, double *);
 
@@ -332,6 +338,7 @@ void    canopy_column(const ppfd_t *, double, const double *,
 void    setup_patch(ppfd_t *);
 void    setup_target(ppfd_t *);
 double  canopy_path(const ppfd_t *, vec3_t, vec3_t);
+int     canopy_may_cross(const ppfd_t *, double, double);
 void    canopy_trans(const ppfd_t *, double, double *);
 int     occ_blocked(const ppfd_t *, vec3_t, vec3_t);
 int     occ_any(const ppfd_t *);
@@ -343,6 +350,11 @@ double  ff_point_poly(vec3_t, vec3_t, const vec3_t *, int);
 double  ff_patch_poly(const patch_t *, const vec3_t *, int, int, vec3_t, vec3_t);
 double  vis_point_patch(const ppfd_t *, vec3_t, const patch_t *, const int *, int *);
 double  vis_patch_patch(const ppfd_t *, const patch_t *, const patch_t *, const int *, int *);
+int     canopy_pair_samples(const ppfd_t *, const patch_t *, const vec3_t *, vec3_t,
+                            const int *, vec3_t *, vec3_t *, double *);
+int     canopy_point_samples(const ppfd_t *, vec3_t, vec3_t, const vec3_t *, vec3_t,
+                             const int *, vec3_t *, vec3_t *, double *);
+void    canopy_plen(const ppfd_t *, int, const vec3_t *, const vec3_t *, const double *, float *);
 void    setup_ff(ppfd_t *);
 
 /* direct.c */
