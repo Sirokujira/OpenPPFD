@@ -486,7 +486,89 @@ static double fold_measure(const ppfd_t *p, const cslab_t *c, double zlo, double
 床・天井が鏡面のとき、端点が箱の外にある線分は鏡像への直線なので
 折り返した実経路で測る。鏡映は弧長を保つので「直線の z がスラブの逆像に
 入っている割合 × 全長」が実経路の群落内長さと厳密に一致する。
+水平範囲を限った群落 (栽培ベッド) は box_path で箱との交差長を測る。
 */
+/* 線分 a + t d (t ∈ [0,1]、長さ len) と軸並行の箱 [lo, hi] の交差長 (slab 法) */
+static double box_chord(vec3_t a, vec3_t d, double len, vec3_t lo, vec3_t hi)
+{
+	const double ac[3] = { a.x, a.y, a.z };
+	const double dc[3] = { d.x, d.y, d.z };
+	const double lc[3] = { lo.x, lo.y, lo.z };
+	const double hc[3] = { hi.x, hi.y, hi.z };
+	double t0 = 0.0, t1 = 1.0;
+	int    i;
+
+	for (i = 0; i < 3; i++) {
+		if (fabs(dc[i]) < (EPS * (len + 1.0))) {
+			/*
+			軸に平行 : 範囲内なら全区間、外なら交わらない。範囲は半開区間
+			[lo, hi) にする : 接して並べたベッドの共有面に乗る光線を両方の
+			箱で数えると二重計上になるため (並べたベッド = 1 枚のスラブ)。
+			*/
+			if ((ac[i] < lc[i]) || (ac[i] >= hc[i])) return 0.0;
+		}
+		else {
+			double ta = (lc[i] - ac[i]) / dc[i];
+			double tb = (hc[i] - ac[i]) / dc[i];
+			if (ta > tb) { const double t = ta; ta = tb; tb = t; }
+			if (ta > t0) t0 = ta;
+			if (tb < t1) t1 = tb;
+			if (t1 <= t0) return 0.0;
+		}
+	}
+	return (t1 - t0) * len;
+}
+
+/*
+水平範囲を限った群落 (栽培ベッドの上だけ) の線分 a-b の経路長。
+
+鏡像への直線は箱型ビリヤードの展開なので、実経路は展開空間に並んだ
+チャンバの複製を順に通る (occ_blocked_img と同じ考え方)。複製 k の中の
+実経路が群落の箱 C を通る長さ = 直線と C の複製 T_k(C) の交差長で、
+鏡映は弧長を保つので総和が実経路の群落内長さに厳密に等しい。T_k(C) は
+複製 k の内部にあるので、直線が通らない複製の T_k(C) に誤って当たる
+ことはない。複製の番号は端点が入っている複製から決める (各軸の座標は
+直線上で単調なので、その間の番号をすべて調べれば足りる)。鏡面の無い
+軸は折り返さないので複製 0 だけ。
+*/
+static double box_path(const ppfd_t *p, const cslab_t *c, vec3_t a, vec3_t b, vec3_t d, double len)
+{
+	const double L[3] = { p->Lx, p->Ly, p->Lz };
+	const double ac[3] = { a.x, a.y, a.z };
+	const double bc[3] = { b.x, b.y, b.z };
+	int    klo[3], khi[3], i, k0, k1, k2;
+	double sum = 0.0;
+
+	for (i = 0; i < 3; i++) {
+		const int mir = (p->mat[p->wallmat[2 * i]].rhos > 0.0) ||
+		                (p->mat[p->wallmat[(2 * i) + 1]].rhos > 0.0);
+		if (mir && (L[i] > 0.0)) {
+			const int ka = (int)floor(ac[i] / L[i]);
+			const int kb = (int)floor(bc[i] / L[i]);
+			klo[i] = (ka < kb) ? ka : kb;
+			khi[i] = (ka < kb) ? kb : ka;
+		}
+		else {
+			klo[i] = 0;
+			khi[i] = 0;
+		}
+	}
+	for (k0 = klo[0]; k0 <= khi[0]; k0++) {
+		for (k1 = klo[1]; k1 <= khi[1]; k1++) {
+			for (k2 = klo[2]; k2 <= khi[2]; k2++) {
+				const vec3_t u = map_copy(p, v_make(c->x0, c->y0, c->zbot), k0, k1, k2);
+				const vec3_t v = map_copy(p, v_make(c->x1, c->y1, c->ztop), k0, k1, k2);
+				const vec3_t lo = v_make((u.x < v.x) ? u.x : v.x, (u.y < v.y) ? u.y : v.y,
+				                         (u.z < v.z) ? u.z : v.z);
+				const vec3_t hi = v_make((u.x < v.x) ? v.x : u.x, (u.y < v.y) ? v.y : u.y,
+				                         (u.z < v.z) ? v.z : u.z);
+				sum += box_chord(a, d, len, lo, hi);
+			}
+		}
+	}
+	return sum;
+}
+
 double canopy_path(const ppfd_t *p, vec3_t a, vec3_t b)
 {
 	const vec3_t d = v_sub(b, a);
@@ -513,6 +595,10 @@ double canopy_path(const ppfd_t *p, vec3_t a, vec3_t b)
 		const cslab_t *c = &p->slab[j];
 		double t0, t1, lo, hi;
 
+		if (!c->full) {
+			sum += c->w * box_path(p, c, a, b, d, len);
+			continue;
+		}
 		if (horiz) {
 			/* ほぼ水平な線分 : 全体がスラブ内かどうか */
 			if ((zfold >= c->zbot) && (zfold <= c->ztop)) sum += c->w * len;

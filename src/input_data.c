@@ -859,13 +859,30 @@ int input_data(FILE *fp, ppfd_t *p)
 		else if (!strcmp(token[0], "canopy")) {
 			int    im;
 			cslab_t sl;
-			/* canopy = ztop zbot LAI G leafmaterial (複数行で多段ラックの各段) */
-			if (ntok < 7) { fprintf(stderr, "*** invalid canopy data\n"); ierr = 1; continue; }
+			/*
+			canopy = ztop zbot LAI G leafmaterial [x0 x1 y0 y1]
+			(複数行で多段ラックの各段・栽培ベッドごとの群落)。水平範囲を
+			省略すると断面全体 (従来のスラブ)。LAI は範囲の床面積あたり。
+			*/
+			if ((ntok < 7) || ((ntok > 7) && (ntok < 11))) {
+				fprintf(stderr, "*** invalid canopy data\n");
+				ierr = 1;
+				continue;
+			}
 			memset(&sl, 0, sizeof(sl));
 			sl.ztop = atof(token[2]);
 			sl.zbot = atof(token[3]);
 			sl.lai  = atof(token[4]);
 			sl.k0   = atof(token[5]);
+			sl.full = 1;
+			if (ntok >= 11) {
+				/* 範囲の検査はチャンバの寸法が決まってから (入力の読み終わり) */
+				sl.x0 = atof(token[7]);
+				sl.x1 = atof(token[8]);
+				sl.y0 = atof(token[9]);
+				sl.y1 = atof(token[10]);
+				sl.full = 0;
+			}
 			im = find_mat(p, token[6]);
 			if (im < 0) {
 				fprintf(stderr, "*** unknown material : %s\n", token[6]);
@@ -1048,13 +1065,50 @@ int input_data(FILE *fp, ppfd_t *p)
 				p->slab[best] = t;
 			}
 		}
-		for (j = 1; j < p->nslab; j++) {
-			/* 重なると同じ葉を二重に数えるので弾く (接するのは可) */
-			if (p->slab[j].ztop > p->slab[j - 1].zbot) {
-				fprintf(stderr, "*** canopy slabs overlap : z = %g..%g and %g..%g\n",
-					p->slab[j].zbot, p->slab[j].ztop,
-					p->slab[j - 1].zbot, p->slab[j - 1].ztop);
+		/*
+		水平範囲 : 省略は断面全体。範囲を書いても断面全体を覆うなら従来の
+		スラブとして扱う (同じ経路で計算するので結果がビット一致する)。
+		*/
+		for (j = 0; j < p->nslab; j++) {
+			cslab_t *c = &p->slab[j];
+			if (!c->full) {
+				if ((c->x1 <= c->x0) || (c->y1 <= c->y0)) {
+					fprintf(stderr, "*** invalid canopy extent : x %g..%g, y %g..%g\n",
+						c->x0, c->x1, c->y0, c->y1);
+					return 1;
+				}
+				if ((c->x0 < -EPS) || (c->x1 > p->Lx + EPS) || (c->y0 < -EPS) || (c->y1 > p->Ly + EPS)) {
+					fprintf(stderr, "*** canopy extent outside chamber : x %g..%g, y %g..%g\n",
+						c->x0, c->x1, c->y0, c->y1);
+					return 1;
+				}
+				if ((c->x0 <= EPS) && (c->x1 >= p->Lx - EPS) && (c->y0 <= EPS) && (c->y1 >= p->Ly - EPS)) {
+					c->full = 1;
+				}
+			}
+			if (c->full) {
+				c->x0 = 0.0;
+				c->x1 = p->Lx;
+				c->y0 = 0.0;
+				c->y1 = p->Ly;
+			}
+			/* 範囲を限った群落は鏡像の複製へ写すので、チャンバの中に収める */
+			if (!c->full && ((c->zbot < -EPS) || (c->ztop > p->Lz + EPS))) {
+				fprintf(stderr, "*** canopy outside chamber : z = %g..%g\n", c->zbot, c->ztop);
 				return 1;
+			}
+		}
+		for (j = 0; j < p->nslab; j++) {
+			for (k = j + 1; k < p->nslab; k++) {
+				/* 重なると同じ葉を二重に数えるので弾く (接するのは可) */
+				const cslab_t *u = &p->slab[j], *v = &p->slab[k];
+				if ((u->zbot < v->ztop) && (v->zbot < u->ztop)
+				 && (u->x0 < v->x1) && (v->x0 < u->x1)
+				 && (u->y0 < v->y1) && (v->y0 < u->y1)) {
+					fprintf(stderr, "*** canopy slabs overlap : z = %g..%g and %g..%g\n",
+						v->zbot, v->ztop, u->zbot, u->ztop);
+					return 1;
+				}
 			}
 		}
 		/*
@@ -1080,6 +1134,11 @@ int input_data(FILE *fp, ppfd_t *p)
 				p->slab[j].w = (j == iref) ? 1.0 :
 					((ref > 0.0) ? ((p->slab[j].k0 * p->slab[j].a) / ref) : 1.0);
 			}
+		}
+		if (p->canopy.scatter && !p->slab[0].full) {
+			fprintf(stderr, "*** leafscatter needs a canopy covering the whole cross-section\n");
+			fprintf(stderr, "    (the two-stream field is horizontally uniform)\n");
+			return 1;
 		}
 		if (p->canopy.scatter && (p->nslab > 1)) {
 			fprintf(stderr, "*** leafscatter supports a single canopy slab only "

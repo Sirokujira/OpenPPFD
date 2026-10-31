@@ -691,6 +691,53 @@ sed -e 's/^material = blackleaf gray 0.0 0.0/material = blackleaf gray 0.25 0.25
 run scat_white.ppfd
 chkabs "difftrans: scatter closure" "$(logval 'closure error')" 1e-5
 
+echo "== (u) canopy over growing beds only (finite horizontal extent) =="
+# canopybed.ppfd : x 0.3..0.7, y 0.3..0.7, z 0.4..0.8 の箱だけに黒葉の群落。
+# 天井中心の光源から 3 点へ向かう光線の箱の中の長さを解析的に求め、
+# canopy 行を消した変種との比 (透過率) で判定する
+run canopybed.ppfd
+bc_c=$(sumrow c 5); bc_e=$(sumrow e 5); bc_k=$(sumrow k 5)
+sed '/^canopy/d' "$SRC/canopybed.ppfd" > "$WORK/canopybed0.ppfd"
+run canopybed0.ppfd
+chk "bed: vertical through"   "$(awk -v a="$bc_c" -v b="$(sumrow c 5)" 'BEGIN {printf "%.9g", a / b}')" 0.3678794 1e-5
+chk "bed: exits side face"    "$(awk -v a="$bc_e" -v b="$(sumrow e 5)" 'BEGIN {printf "%.9g", a / b}')" 0.5717708 1e-5
+chk "bed: exits edge"         "$(awk -v a="$bc_k" -v b="$(sumrow k 5)" 'BEGIN {printf "%.9g", a / b}')" 0.5420633 1e-5
+# 範囲を断面全体にすると従来のスラブと同じ経路になる (ビット一致)。
+# rack.ppfd (白壁・棚板) の群落を 2 枚のベッドに割っても結果が変わらない
+run rack.ppfd
+cp "$WORK/ppfd_map_canopybase.csv" "$WORK/map_bed0.csv"
+sed 's/^canopy = 0.25 0.05 3.0 0.5 leaf/canopy = 0.25 0.05 3.0 0.5 leaf  0 1.2 0 0.6/' \
+	"$SRC/rack.ppfd" > "$WORK/rack_bedfull.ppfd"
+run rack_bedfull.ppfd
+chkabs "bed: full extent == slab" "$(maxdiff map_bed0.csv ppfd_map_canopybase.csv)" 0
+sed 's/^canopy = 0.25 0.05 3.0 0.5 leaf/canopy = 0.25 0.05 3.0 0.5 leaf  0 0.6 0 0.6\ncanopy = 0.25 0.05 3.0 0.5 leaf  0.6 1.2 0 0.6/' \
+	"$SRC/rack.ppfd" > "$WORK/rack_beds.ppfd"
+run rack_beds.ppfd
+chkabs "bed: two beds == slab" "$(maxdiff map_bed0.csv ppfd_map_canopybase.csv)" 1e-9
+# 鏡面 2 面 (xmax, zmax) + ベッド : 鏡像への直線を通りうる複製それぞれの
+# 箱の鏡像と照合する。参照解は 2 x 1 x 2 の箱に光源 4 個と箱 4 個
+run mirror7.ppfd
+cp "$WORK/ppfd_map_s.csv" "$WORK/map_m7.csv"
+run mirror7ref.ppfd
+chkabs "bed: specular folded equiv." "$(maxdiff map_m7.csv ppfd_map_s.csv)" 1e-6
+# 重なったベッド・はみ出すベッド・leafscatter との併用は入力段で弾かれる
+for v in ov out ls; do
+	case $v in
+	ov)  sed 's/^canopy = .*/canopy = 0.8 0.4 2.0 0.5 blackleaf  0.3 0.7 0.3 0.7\ncanopy = 0.6 0.5 1.0 0.5 blackleaf  0.6 0.9 0.3 0.7/' \
+		"$SRC/canopybed.ppfd" > "$WORK/canopybed_$v.ppfd" ;;
+	out) sed 's/^canopy = .*/canopy = 0.8 0.4 2.0 0.5 blackleaf  0.3 1.2 0.3 0.7/' \
+		"$SRC/canopybed.ppfd" > "$WORK/canopybed_$v.ppfd" ;;
+	ls)  sed 's/^photoperiod/leafscatter = on\nphotoperiod/' \
+		"$SRC/canopybed.ppfd" > "$WORK/canopybed_$v.ppfd" ;;
+	esac
+	if (cd "$WORK" && "$OPPFD" "canopybed_$v.ppfd" > /dev/null 2>&1); then
+		echo "bed: invalid ($v) rejected -> NG (accepted)" >&2
+		status=1
+	else
+		echo "bed: invalid ($v) rejected -> OK"
+	fi
+done
+
 echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2
