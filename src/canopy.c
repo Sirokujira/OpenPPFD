@@ -355,6 +355,26 @@ static void canopy_plane(const ppfd_t *p, int istop, vec3_t *poly)
       i→j の経路は setup_ff が透過率を作ったのと同じ標本 (canopy_pair_samples)
       で運ぶので、対ごとに「透過 + 各層への預け入れ = 1」が成り立つ。
       素の遮断 k = G a は波長によらないので、この係数は 1 回作れば足りる。
+
+■ 側壁の鏡面との併用
+側壁 (x/y 面) の鏡映は z を保つので、鏡像への直線の z プロファイルは
+実経路のものと同じで、層への預け入れはそのまま展開した直線で測れる。
+帳簿は「光線は止まった所で預ける」に揃える :
+
+  - 鏡面のパッチ j に届いた光のうち、止まる (吸収または拡散反射) のは
+    (1 - ρs_j) の分。ρs_j の分は j の鏡像を通る拡張形態係数の経路が
+    展開した全経路で運び、預け入れもそちらで数える。そこで i → j の
+    預け入れは (1 - ρs_j) 倍する (直接光の光線も同じ。direct.c)。
+    鏡面が無ければ係数は厳密に 1。
+  - 群落の上下面から出た放射も鏡面で折り返す : 面の鏡像への形態係数を
+    Π ρs の重みで足す。面から出た放射束が過不足なく止まるよう
+    Σ_i A_i (1 - ρs_i) Σ_t w_t F(i → T_t(面)) = A_c へ正規化する。
+    鏡面が無ければ従来の Σ_i A_i F_i = A_c そのもの。
+
+完全鏡面 (ρs = 1) ならこれは「鏡映した幾何を実在させた二重箱」の帳簿と
+項ごとに一致する (鏡面のパッチは何も預けず、鏡像経路が全経路を運ぶ)。
+床・天井の鏡面は層の順序を入れ替える (預け入れの順序が折り返す) ので
+併用させない (入力段で弾く)。
 */
 void canopy_setup(ppfd_t *p)
 {
@@ -363,6 +383,8 @@ void canopy_setup(ppfd_t *p)
 	const int nl = c->nlayer;
 	vec3_t ptop[4], pbot[4];
 	double sup = 0.0, sdn = 0.0;
+	strans_t *tr;
+	int    nt;
 	int    i, m;
 
 	p->carea = p->Lx * p->Ly;
@@ -378,15 +400,30 @@ void canopy_setup(ppfd_t *p)
 
 	canopy_plane(p, 1, ptop);
 	canopy_plane(p, 0, pbot);
+	tr = (strans_t *)xmalloc((size_t)MAXSPECT * sizeof(strans_t));
+	nt = spec_transforms(p, tr, MAXSPECT);
 
 	p->cnburied = 0;
 	for (i = 0; i < n; i++) {
 		const patch_t *q = &p->patch[i];
+		/* 止まる割合 (鏡面のパッチでは正反射の分は先へ運ばれる) */
+		const double stop = 1.0 - p->mat[q->imat].rhos;
+		int t, v;
 		/* 上面は「群落より上」の求積点だけ、下面は「群落より下」だけが見る */
 		p->cffup[i] = ff_patch_poly(q, ptop, 4, 4, ptop[0], v_make(0, 0, 1));
 		p->cffdn[i] = ff_patch_poly(q, pbot, 4, 4, pbot[0], v_make(0, 0, -1));
-		sup += q->area * p->cffup[i];
-		sdn += q->area * p->cffdn[i];
+		/* 側壁の鏡面で折り返して見える上下面 (面の鏡像。z は変わらない) */
+		for (t = 0; t < nt; t++) {
+			vec3_t it[4], ib[4];
+			for (v = 0; v < 4; v++) {
+				it[v] = spec_apply(p, &tr[t], ptop[v]);
+				ib[v] = spec_apply(p, &tr[t], pbot[v]);
+			}
+			p->cffup[i] += tr[t].w * ff_patch_poly(q, it, 4, 4, ptop[0], v_make(0, 0, 1));
+			p->cffdn[i] += tr[t].w * ff_patch_poly(q, ib, 4, 4, pbot[0], v_make(0, 0, -1));
+		}
+		sup += (q->area * stop) * p->cffup[i];
+		sdn += (q->area * stop) * p->cffdn[i];
 		if ((p->cffup[i] <= 0.0) && (p->cffdn[i] <= 0.0)
 		 && (q->c.z < c->ztop) && (q->c.z > c->zbot)) {
 			p->cnburied++;
@@ -413,14 +450,30 @@ void canopy_setup(ppfd_t *p)
 		vec3_t *xa = (vec3_t *)xmalloc((size_t)CANOPY_MAXSAMP * sizeof(vec3_t));
 		vec3_t *yb = (vec3_t *)xmalloc((size_t)CANOPY_MAXSAMP * sizeof(vec3_t));
 		double *W  = (double *)xmalloc((size_t)CANOPY_MAXSAMP * sizeof(double));
-		int     j;
+		int     j, t;
 		for (j = 0; j < n; j++) {
-			const double f = p->ff[((size_t)i * n) + j];
+			/* 止まる分だけ預ける (鏡面のパッチ j では ρs の分を鏡像経路が運ぶ) */
+			const double f = p->ff[((size_t)i * n) + j] * (1.0 - p->mat[p->patch[j].imat].rhos);
 			int ns, a;
 			if (f <= 0.0) continue;
 			/* setup_ff が透過率を作ったのと同じ標本で預ける (対ごとに透過 + 預け入れ = 1) */
 			ns = canopy_pair_samples(p, &p->patch[i], p->patch[j].p, p->patch[j].n, NULL, xa, yb, W);
 			for (a = 0; a < ns; a++) canopy_deposit(p, xa[a], yb[a], f * W[a], dep, seg);
+		}
+		/* 鏡像経路 : 展開した直線のまま預ける (側壁の鏡映は z を保つ) */
+		for (t = 0; t < p->nst; t++) {
+			for (j = 0; j < n; j++) {
+				const patch_t *qj = &p->patch[j];
+				const double f = p->ffs[((size_t)t * n * n) + ((size_t)i * n) + j]
+				               * (1.0 - p->mat[qj->imat].rhos);
+				vec3_t q4[4];
+				int ns, a, v;
+				if (f <= 0.0) continue;
+				for (v = 0; v < 4; v++) q4[v] = spec_apply(p, &tr[t], qj->p[v]);
+				ns = canopy_pair_samples(p, &p->patch[i], q4, spec_apply_dir(&tr[t], qj->n),
+				                         tr[t].n, xa, yb, W);
+				for (a = 0; a < ns; a++) canopy_deposit(p, xa[a], yb[a], f * W[a], dep, seg);
+			}
 		}
 		for (j = 0; j < nl; j++) dep[j] *= p->patch[i].area;
 		free(seg);
@@ -428,6 +481,7 @@ void canopy_setup(ppfd_t *p)
 		free(yb);
 		free(W);
 	}
+	free(tr);
 	(void)m;
 }
 

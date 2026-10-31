@@ -76,11 +76,24 @@ static void gather_target(ppfd_t *p)
 			if (p->canopy.on && p->canopy.scatter) {
 				/* 群落が返す拡散光 : 外なら上下面から、内部なら層の下向き流束 */
 				if (x.z >= p->canopy.ztop) {
-					const double f = ff_point_poly(x, nz, ctop, 4);
+					double f = ff_point_poly(x, nz, ctop, 4);
+					for (i2 = 0; i2 < nstr; i2++) {
+						/* 側壁の鏡面で折り返して見える上面 (面の鏡像) */
+						vec3_t c4[4];
+						int    v;
+						for (v = 0; v < 4; v++) c4[v] = spec_apply(p, &str[i2], ctop[v]);
+						f += str[i2].w * ff_point_poly(x, nz, c4, 4);
+					}
 					for (il = 0; il < nl; il++) E[il] += f * p->cbtop[il];
 				}
 				else if (x.z <= p->canopy.zbot) {
-					const double f = ff_point_poly(x, nz, cbot, 4);
+					double f = ff_point_poly(x, nz, cbot, 4);
+					for (i2 = 0; i2 < nstr; i2++) {
+						vec3_t c4[4];
+						int    v;
+						for (v = 0; v < 4; v++) c4[v] = spec_apply(p, &str[i2], cbot[v]);
+						f += str[i2].w * ff_point_poly(x, nz, c4, 4);
+					}
 					for (il = 0; il < nl; il++) E[il] += f * p->cbbot[il];
 				}
 				else {
@@ -225,9 +238,21 @@ void solve(ppfd_t *p)
 	t0 = cputime();
 	setup_patch(p);
 	setup_target(p);
-	plog(p, "patches = %d (chamber %d x %d x %d, occluders/panels %d), spectral bins = %d\n",
-		p->npatch, 6, p->ndivu, p->ndivv,
-		p->npatch - (6 * p->ndivu * p->ndivv), p->nlam);
+	{
+		int f, nwall = 0, uniform = 1;
+		for (f = 0; f < 6; f++) {
+			nwall += p->wdivu[f] * p->wdivv[f];
+			if ((p->wdivu[f] != p->ndivu) || (p->wdivv[f] != p->ndivv)) uniform = 0;
+		}
+		if (uniform) {
+			plog(p, "patches = %d (chamber %d x %d x %d, occluders/panels %d), spectral bins = %d\n",
+				p->npatch, 6, p->ndivu, p->ndivv, p->npatch - nwall, p->nlam);
+		}
+		else {
+			plog(p, "patches = %d (chamber %d, per-face div, occluders/panels %d), spectral bins = %d\n",
+				p->npatch, nwall, p->npatch - nwall, p->nlam);
+		}
+	}
 
 	setup_ff(p);
 	plog(p, "form factor : row sum error = %.3e, reciprocity error = %.3e  (%.2f s)\n",

@@ -460,8 +460,13 @@ void direct_patch(ppfd_t *p)
 		nedge += edge;
 
 		if (dp != NULL) {
-			/* 面積平均 -> 放射束 [W] */
-			for (i = 0; i < ns * nl; i++) dp[i] *= q->area;
+			/*
+			面積平均 -> 放射束 [W]。鏡面のパッチでは、届いた光のうち正反射する
+			ρs の分は鏡像光源からの光線が展開した全経路で預け直すので、ここで
+			預けるのは (1 - ρs) の分だけ (鏡面が無ければ係数は厳密に 1)。
+			*/
+			const double wq = q->area * (1.0 - p->mat[q->imat].rhos);
+			for (i = 0; i < ns * nl; i++) dp[i] *= wq;
 			free(dtmp);
 			free(seg);
 		}

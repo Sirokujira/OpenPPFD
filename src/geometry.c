@@ -122,7 +122,13 @@ void setup_patch(ppfd_t *p)
 	org[4] = v_make(0,     0,     0);      ue[4] = v_make(p->Lx, 0, 0); ve[4] = v_make(0, p->Ly, 0); nrm[4] = v_make(0, 0,  1);
 	org[5] = v_make(0,     0,     p->Lz);  ue[5] = v_make(0, p->Ly, 0); ve[5] = v_make(p->Lx, 0, 0); nrm[5] = v_make(0, 0, -1);
 
-	n = 6 * p->ndivu * p->ndivv;
+	/* 面ごとの分割数 (wall の div。省略時は patchdiv) */
+	n = 0;
+	for (f = 0; f < 6; f++) {
+		if (p->wdivu[f] < 1) p->wdivu[f] = p->ndivu;
+		if (p->wdivv[f] < 1) p->wdivv[f] = p->ndivv;
+		n += p->wdivu[f] * p->wdivv[f];
+	}
 	for (io = 0; io < p->nocc; io++) {
 		occluder_t *o = &p->occ[io];
 		if (o->ndivu < 1) o->ndivu = p->ndivu;
@@ -150,7 +156,7 @@ void setup_patch(ppfd_t *p)
 	k = 0;
 	for (f = 0; f < 6; f++) {
 		k = add_face(p->patch, k, org[f], ue[f], ve[f], nrm[f],
-			p->ndivu, p->ndivv, p->wallmat[f], f);
+			p->wdivu[f], p->wdivv[f], p->wallmat[f], f);
 	}
 	for (io = 0; io < p->nocc; io++) {
 		const occluder_t *o = &p->occ[io];

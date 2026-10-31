@@ -631,8 +631,18 @@ int input_data(FILE *fp, ppfd_t *p)
 			p->spec[p->nspec++] = s;
 		}
 		else if (!strcmp(token[0], "wall")) {
-			int im, f;
+			/* wall = <面> <材料名> [div <nu> <nv>] */
+			int im, f, du = 0, dv = 0;
 			if (ntok < 4) { fprintf(stderr, "*** invalid wall data\n"); ierr = 1; continue; }
+			if ((ntok >= 7) && streq_ci(token[4], "div")) {
+				du = atoi(token[5]);
+				dv = atoi(token[6]);
+				if ((du < 1) || (dv < 1)) {
+					fprintf(stderr, "*** invalid wall div : %s %s\n", token[5], token[6]);
+					ierr = 1;
+					continue;
+				}
+			}
 			im = find_mat(p, token[3]);
 			if (im < 0) {
 				fprintf(stderr, "*** unknown material : %s\n", token[3]);
@@ -640,10 +650,18 @@ int input_data(FILE *fp, ppfd_t *p)
 				continue;
 			}
 			if (streq_ci(token[2], "all")) {
-				for (f = 0; f < 6; f++) p->wallmat[f] = im;
+				for (f = 0; f < 6; f++) {
+					p->wallmat[f] = im;
+					p->wdivu[f] = du;
+					p->wdivv[f] = dv;
+				}
 			}
 			else if (streq_ci(token[2], "side")) {
-				for (f = 0; f < 4; f++) p->wallmat[f] = im;
+				for (f = 0; f < 4; f++) {
+					p->wallmat[f] = im;
+					p->wdivu[f] = du;
+					p->wdivv[f] = dv;
+				}
 			}
 			else {
 				f = faceid(token[2]);
@@ -653,6 +671,8 @@ int input_data(FILE *fp, ppfd_t *p)
 					continue;
 				}
 				p->wallmat[f] = im;
+				p->wdivu[f] = du;
+				p->wdivv[f] = dv;
 			}
 		}
 		else if (!strcmp(token[0], "led")) {
@@ -1180,10 +1200,18 @@ int input_data(FILE *fp, ppfd_t *p)
 			三角波で折り返せば実経路の z プロファイルが厳密に得られるので、
 			canopy_path (geometry.c) がその折り返しで経路長を測る。どちらも
 			弧長は鏡映で保たれるため、群落減衰は鏡像への直線のまま厳密。
-			散乱の還流だけは鏡像経路ぶんの層への預け入れが要るため未対応。
+			散乱の還流は、側壁の鏡面なら展開した直線のまま層へ預けられる。
 			*/
-			if (p->canopy.scatter) {
-				fprintf(stderr, "*** specular walls cannot be combined with leafscatter yet\n");
+			if (p->canopy.scatter && ((p->mat[p->wallmat[4]].rhos > 0.0) ||
+			                          (p->mat[p->wallmat[5]].rhos > 0.0))) {
+				/*
+				側壁の鏡面は z を保つので、鏡像への直線のまま層へ預けられる
+				(canopy_setup)。床・天井の鏡面は経路を z で折り返し、層を通る
+				順序が入れ替わる (下りの後に上り) ので、預け入れの順序を経路に
+				沿って組み直す必要があり未対応。
+				*/
+				fprintf(stderr, "*** a specular floor/ceiling cannot be combined with leafscatter yet\n");
+				fprintf(stderr, "    (specular side walls can)\n");
 				return 1;
 			}
 		}

@@ -212,6 +212,7 @@ typedef struct {
 	double    Lx, Ly, Lz;
 	int       wallmat[6];           /* 面 0:xmin 1:xmax 2:ymin 3:ymax 4:zmin 5:zmax */
 	int       ndivu, ndivv;         /* 1 面あたりの分割数 */
+	int       wdivu[6], wdivv[6];   /* 面ごとの分割数 (wall の div。0 = patchdiv に従う) */
 
 	/* 入力テーブル */
 	int       nmat, nspec, nemit, ntarget, nband, ndist, nocc, nslab, npanel;

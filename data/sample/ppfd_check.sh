@@ -371,14 +371,10 @@ awk -v m="$M3AVG" -v o="$(sumval 5)" 'BEGIN {
 		"speccan: mirror adds PPFD", m, o, (m > o) ? "OK" : "NG";
 	exit (m > o) ? 0 : 1
 }' || status=1
-# 併用できない組み合わせは入力段で弾かれる
+# 側壁の鏡面は leafscatter と併用できる (検証 (v))。収支が閉じること
 sed 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/mirror3.ppfd" > "$WORK/mirror3ls.ppfd"
-if (cd "$WORK" && "$OPPFD" mirror3ls.ppfd > /dev/null 2>&1); then
-	echo "speccan: +leafscatter rejected -> NG (accepted invalid combo)" >&2
-	status=1
-else
-	echo "speccan: +leafscatter rejected -> OK"
-fi
+run mirror3ls.ppfd
+chkabs "speccan: +leafscatter closure" "$(logval 'closure error')" 1e-5
 
 echo
 echo "== (n) specular ceiling + canopy (folded path attenuation) =="
@@ -737,6 +733,34 @@ for v in ov out ls; do
 		echo "bed: invalid ($v) rejected -> OK"
 	fi
 done
+
+echo "== (v) specular side walls + leafscatter =="
+# mirror8.ppfd : 側壁 2 面 (x = 1, y = 1) が完全鏡面、散乱葉の群落。
+# 鏡面のパッチで終わる光線は (1 - rho_s) の分だけ預け、rho_s の分は
+# 鏡像経路が展開した全経路で預ける。群落の上下面も鏡面で折り返す
+run mirror8.ppfd
+chkabs "specscat: closure" "$(logval 'closure error')" 1e-6
+m8c=$(logval 'absorbed by canopy')
+for t in below above mid; do cp "$WORK/ppfd_map_$t.csv" "$WORK/map_m8$t.csv"; done
+# 完全鏡面の 2 面 = x と y で 2 倍にした幾何 (光源 4 個、群落は 2 x 2 に広がる)
+run mirror8ref.ppfd
+chkabs "specscat: equiv. below canopy" "$(maxdiff map_m8below.csv ppfd_map_below.csv)" 1e-6
+chkabs "specscat: equiv. above canopy" "$(maxdiff map_m8above.csv ppfd_map_above.csv)" 1e-6
+chkabs "specscat: equiv. in canopy"    "$(maxdiff map_m8mid.csv ppfd_map_mid.csv)" 1e-6
+chk "specscat: canopy absorption" "$m8c" "$(awk -v a="$(logval 'absorbed by canopy')" 'BEGIN {printf "%.9g", a / 4}')" 1e-5
+# 部分的な鏡面 (rho_d 0.05 + rho_s 0.9) と白壁でも収支が閉じる
+sed -e 's/^material = mirror gray 0.0 specular 1.0/material = mirror gray 0.05 specular 0.9/' \
+    -e 's/^wall = all  black/wall = all  white/' "$SRC/mirror8.ppfd" > "$WORK/mirror8p.ppfd"
+run mirror8p.ppfd
+chkabs "specscat: partial mirror closure" "$(logval 'closure error')" 1e-5
+# 床・天井の鏡面は層を通る順序を折り返すので、leafscatter との併用は弾く
+sed 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/mirror4.ppfd" > "$WORK/mirror4ls2.ppfd"
+if (cd "$WORK" && "$OPPFD" mirror4ls2.ppfd > /dev/null 2>&1); then
+	echo "specscat: z-mirror rejected -> NG (accepted invalid combo)" >&2
+	status=1
+else
+	echo "specscat: z-mirror rejected -> OK"
+fi
 
 echo
 if [ "$status" -ne 0 ]; then

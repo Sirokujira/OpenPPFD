@@ -1,0 +1,49 @@
+# 検証 (v) 側壁の鏡面 + leafscatter (群落の散乱光を鏡面ごしに運ぶ)
+#
+# 側壁 x = 1 と y = 1 を完全鏡面 (rho_s = 1.0)、床を白 (0.6)、天井を
+# 灰 (0.5)、残りの側壁を黒にし、散乱葉 (omega = 0.5) の群落 z 0.2..0.5
+# (LAI 2、G 0.5) で leafscatter = on にする。光源は (0.3, 0.4, 0.85) の
+# 等方点光源。
+#
+# ■ 帳簿 : 光線は止まった所で預ける
+# 側壁の鏡映は z を保つので、鏡像への直線の z プロファイルは実経路と同じで、
+# 層への預け入れは展開した直線のまま測れる。ただし鏡面のパッチに届いた
+# 光のうち止まる (吸収または拡散反射) のは (1 - rho_s) の分だけで、
+# rho_s の分は鏡像経路が全経路を運んで預ける。そこで鏡面のパッチで終わる
+# 光線の預け入れは (1 - rho_s) 倍する。群落の上下面から出た放射も鏡面で
+# 折り返す (面の鏡像への形態係数)。完全鏡面ならこの帳簿は「鏡映した幾何を
+# 実在させた二重箱」と項ごとに一致する。
+#
+# ■ 二重箱等価 (mirror8ref.ppfd と比較)
+# 完全鏡面の 2 面は「x と y の両方で 2 倍にした幾何」と厳密に等価 :
+#   - チャンバを 2 x 2 x 1、光源の鏡像 3 個を実光源として置く
+#   - 群落は断面全体なので 2 x 2 に広がるだけ (二流の場は水平一様)
+#   - 黒い側壁の分割を面ごとの div でそろえる (z 方向の密度を同じにする。
+#     そろえないと群落の下面の正規化の求積誤差が割れて 1.5e-4 ずれる)
+# specbounce = 2 で鏡像は 3 個 (3 段目は必ず黒い面を通る)。
+
+OpenPPFD 1 0
+title = specular side walls + leafscatter
+wavelength = 380 780 5
+chamber    = 1.0 1.0 1.0
+patchdiv   = 6 6
+material = black  gray 0.0
+material = white  gray 0.6
+material = ceil   gray 0.5
+material = mirror gray 0.0 specular 1.0
+material = leaf   gray 0.25 0.25
+wall = all  black
+wall = zmin white
+wall = zmax ceil
+wall = xmax mirror
+wall = ymax mirror
+spectrum = na555 mono 555
+led = 0.3 0.4 0.85 1.0 na555 iso
+canopy = 0.5 0.2 2.0 0.5 leaf
+leafscatter = on
+target      = below 0.1 6 6
+target      = above 0.7 6 6
+target      = mid 0.35 6 6
+photoperiod = 16
+specbounce  = 2
+end
