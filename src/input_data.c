@@ -168,6 +168,23 @@ static int build_material(ppfd_t *p, pmat_t *m, char **tok, int ntok, int k)
 	波長非依存のスカラ : 反射フィルムや研磨アルミはほぼ中性なので、
 	分光にせず 1 個の値で持つ (README に明記)。
 	*/
+	/*
+	光沢反射は末尾の "glossy <ρg> <n>" (montecarlo のみ。鏡面の向きのまわりの
+	cos^n ローブ)。specular と同じく波長非依存のスカラ。
+	*/
+	m->rhog = 0.0;
+	m->gexp = 0.0;
+	for (i = k; i + 2 < ntok; i++) {
+		if (streq_ci(tok[i], "glossy")) {
+			m->rhog = atof(tok[i + 1]);
+			m->gexp = atof(tok[i + 2]);
+			if (m->rhog < 0.0) m->rhog = 0.0;
+			if (m->rhog > 1.0) m->rhog = 1.0;
+			if (m->gexp < 0.0) m->gexp = 0.0;
+			ntok = i;
+			break;
+		}
+	}
 	for (i = k; i + 1 < ntok; i++) {
 		if (streq_ci(tok[i], "specular") || streq_ci(tok[i], "mirror")) {
 			m->rhos = atof(tok[i + 1]);
@@ -501,6 +518,7 @@ int input_data(FILE *fp, ppfd_t *p)
 	p->converg = 1e-6;
 	p->canopy.k0 = 0.5;
 	p->canopy.nlayer = 8;
+	p->mc_seed = 1;
 	p->specbounce = 2;
 
 	/* ---- 1 回目 : 分光グリッドと作用曲線を確定する ---------------- */
@@ -1024,6 +1042,12 @@ int input_data(FILE *fp, ppfd_t *p)
 		else if (!strcmp(token[0], "photoperiod")) {
 			p->photoperiod = atof(token[2]);
 		}
+		else if (!strcmp(token[0], "montecarlo")) {
+			/* montecarlo = <光子数> [種] : 決定論の解法の代わりに光子追跡で解く */
+			const double nn = atof(token[2]);
+			p->mc_n = (nn > 2147483647.0) ? 2147483647 : ((nn < 0.0) ? 0 : (int)nn);
+			if (ntok >= 4) p->mc_seed = (unsigned long long)atof(token[3]);
+		}
 		else if (!strcmp(token[0], "solver")) {
 			if (ntok >= 3) p->maxiter = atoi(token[2]);
 			if (ntok >= 4) p->converg = atof(token[3]);
@@ -1108,7 +1132,7 @@ int input_data(FILE *fp, ppfd_t *p)
 	運ばれずに消える (収支が黙って破れる : 実測 -1.4%)。入力段で弾く。
 	*/
 	for (i = 0; i < p->nocc; i++) {
-		if (p->mat[p->occ[i].imat].rhos > 0.0) {
+		if ((p->mat[p->occ[i].imat].rhos > 0.0) && (p->mc_n <= 0)) {
 			fprintf(stderr, "*** occluder \"%s\" : specular material \"%s\" is not supported\n",
 				p->occ[i].name, p->mat[p->occ[i].imat].name);
 			fprintf(stderr, "    (specular reflection is modelled on chamber walls only)\n");
@@ -1116,7 +1140,7 @@ int input_data(FILE *fp, ppfd_t *p)
 		}
 	}
 	for (i = 0; i < p->npanel; i++) {
-		if (p->mat[p->panel[i].imat].rhos > 0.0) {
+		if ((p->mat[p->panel[i].imat].rhos > 0.0) && (p->mc_n <= 0)) {
 			fprintf(stderr, "*** panel \"%s\" : specular material \"%s\" is not supported\n",
 				p->panel[i].name, p->mat[p->panel[i].imat].name);
 			fprintf(stderr, "    (specular reflection is modelled on chamber walls only)\n");
@@ -1360,6 +1384,29 @@ int input_data(FILE *fp, ppfd_t *p)
 		預ける (canopy_deposit)。群落の面から出た光が床・天井の鏡面で同じ面へ
 		戻る分は二流の境界の反射率になる (canopy_setup の crtop / crbot)。
 		*/
+	}
+
+	/*
+	光沢反射 (glossy) はラジオシティでは表せない (放射輝度が向きによらない
+	前提) ので montecarlo のときだけ受け付ける。ρd + ρs + ρg <= 1。
+	*/
+	{
+		int im2, il2;
+		for (im2 = 0; im2 < p->nmat; im2++) {
+			const pmat_t *m = &p->mat[im2];
+			if (m->rhog <= 0.0) continue;
+			if (p->mc_n <= 0) {
+				fprintf(stderr, "*** material \"%s\" : glossy reflection needs montecarlo = <photons>\n", m->name);
+				fprintf(stderr, "    (radiosity assumes view-independent radiance)\n");
+				return 1;
+			}
+			for (il2 = 0; il2 < p->nlam; il2++) {
+				if (m->rho[il2] + m->rhos + m->rhog > 1.0 + 1e-12) {
+					fprintf(stderr, "*** material \"%s\" : rho_d + rho_s + rho_g > 1\n", m->name);
+					return 1;
+				}
+			}
+		}
 	}
 
 	return 0;

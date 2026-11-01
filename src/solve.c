@@ -246,9 +246,41 @@ static void energy_balance(ppfd_t *p)
 	free(E);
 }
 
+/* モンテカルロのときの光源の総量 (energy_balance の前半と同じ) */
+static void source_totals(ppfd_t *p)
+{
+	const int nl = p->nlam;
+	double *E = (double *)xcalloc((size_t)nl, sizeof(double));
+	int     ie, il;
+
+	p->flux_total = 0.0;
+	p->watt_total = 0.0;
+	p->ppf_total = 0.0;
+	for (ie = 0; ie < p->nemit; ie++) {
+		const emitter_t *e = &p->emit[ie];
+		p->flux_total += e->flux;
+		p->watt_total += e->watt;
+		for (il = 0; il < nl; il++) E[il] = e->flux * p->spec[e->ispec].w[il];
+		p->ppf_total += calc_ppfd(p, E);
+	}
+	free(E);
+}
+
 void solve(ppfd_t *p)
 {
 	double t0;
+
+	if (p->mc_n > 0) {
+		/* 光子追跡 : 形態係数・鏡像・ラジオシティは使わない (montecarlo.c) */
+		t0 = cputime();
+		setup_target(p);
+		plog(p, "monte carlo : %d photons, seed %llu (cell values are cell averages)\n",
+			p->mc_n, p->mc_seed);
+		mc_solve(p);
+		plog(p, "monte carlo done  (%.2f s)\n", cputime() - t0);
+		source_totals(p);
+		return;
+	}
 
 	t0 = cputime();
 	spec_fit_order(p);

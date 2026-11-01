@@ -154,6 +154,21 @@ void output_log(ppfd_t *p)
 	}
 	plog(p, "\n--- energy balance ---\n");
 	plog(p, "emitted           = %12.6g W\n", p->flux_total);
+	if (p->mc_n > 0) {
+		/* 光子は必ずどこかで吸収されるので、収支のずれは打ち切った分だけ */
+		plog(p, "absorbed by walls = %12.6g W%s\n", p->absorb_wall,
+			occ_any(p) ? " (incl. occluders)" : "");
+		if (p->canopy.on) {
+			plog(p, "absorbed by canopy= %12.6g W (monte carlo, leaf scattering included)\n", p->absorb_canopy);
+			plog(p, "canopy PPF capture= %12.6g umol/s (%.2f %% of PPF)\n",
+				p->canopy_abs, (p->ppf_total > 0.0) ? (100.0 * p->canopy_abs / p->ppf_total) : 0.0);
+		}
+		plog(p, "truncated photons = %12.6g W (more than the interaction limit)\n", p->mc_lost);
+		plog(p, "closure error     = %12.3e (should be 0; = truncated photons)\n",
+			(p->flux_total > 0.0)
+				? (((p->absorb_wall + p->absorb_canopy) - p->flux_total) / p->flux_total) : 0.0);
+		goto targets;
+	}
 	plog(p, "absorbed by walls = %12.6g W%s\n", p->absorb_wall,
 		occ_any(p) ? " (incl. occluders)" : "");
 	plog(p, "mean wall irrad.  = %12.6g W/m2 (wall area %g m2)\n",
@@ -177,6 +192,7 @@ void output_log(ppfd_t *p)
 	}
 
 	/* 測定面 */
+targets:
 	for (it = 0; it < p->ntarget; it++) {
 		target_t *t = &p->target[it];
 		tstat_t   st;

@@ -56,6 +56,8 @@ typedef struct {
 	double *rho;                    /* [nlam] 拡散反射率 0..1 */
 	double *tau;                    /* [nlam] 分光透過率 0..1 (葉のみ使用) */
 	double  rhos;                   /* 鏡面反射率 0..1 (波長非依存。吸収 = 1-rho-rhos) */
+	double  rhog;                   /* 光沢反射率 0..1 (montecarlo のみ。Phong ローブ) */
+	double  gexp;                   /* 光沢ローブの指数 n (cos^n、鏡面の向きのまわり) */
 } pmat_t;
 
 /* ---- スペクトル (波長ビンごとの放射束の重み、総和 1) --------------- */
@@ -237,6 +239,9 @@ typedef struct {
 	photdist_t *dist;
 	occluder_t *occ;
 	panel_t   *panel;               /* [npanel] 斜めの板 */
+	int        mc_n;                /* montecarlo の光子数 (0 = 決定論の解法) */
+	unsigned long long mc_seed;     /* 乱数の種 */
+	double     mc_lost;             /* 相互作用の上限で打ち切った放射束 [W] */
 	int        ncyl;
 	cyl_t     *cyl;                 /* [ncyl] 円柱・円弧 (板は panel に入っている) */
 	cslab_t   *slab;                /* [nslab] 群落スラブ (z の昇順、重なりなし) */
@@ -396,6 +401,9 @@ int     spec_on_mirror(const ppfd_t *, const strans_t *, const patch_t *);
 double  spec_axis_map(double, double, int);
 void    direct_point(const ppfd_t *, vec3_t, vec3_t, double *);
 void    direct_point_ex(const ppfd_t *, vec3_t, vec3_t, double *, double *, double *, unsigned char *);
+
+/* montecarlo.c */
+void    mc_solve(ppfd_t *);
 
 /* radiosity.c */
 void    solve_radiosity(ppfd_t *);

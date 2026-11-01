@@ -956,6 +956,83 @@ for v in zmir floor height noshelf; do
 	fi
 done
 
+echo "== (ab) monte carlo photon tracing (general reflection, 3-D canopy scattering) =="
+# mc.ppfd : 黒いチャンバの点光源。測定面全体の平均 = Φ Ω / (4π A) (統計誤差 0.097%)
+run mc.ppfd
+chk "mc: point source (solid angle)" "$(sumval 14)" 0.2087326 4e-3
+chkabs "mc: black chamber closure" "$(logval 'closure error')" 1e-12
+# スレッド数によらずビット一致 (光子の数は整数)
+cp "$WORK/ppfd_map_floor.csv" "$WORK/map_mc2.csv"
+(cd "$WORK" && "$OPPFD" -n 1 mc.ppfd > /dev/null)
+chkabs "mc: 1 thread == 2 threads" "$(maxdiff map_mc2.csv ppfd_map_floor.csv)" 0
+# 平行平板の拡散透過 2 E3(tau0) (difftrans.ppfd)。鏡像の打ち切りが無いので
+# 決定論の解法より解析解に近い (統計誤差 : tau0 = 1 で 0.094%、3 で 0.37%)
+sed 's/^photoperiod/montecarlo = 4000000 11\nphotoperiod/' "$SRC/difftrans.ppfd" > "$WORK/mcdt1.ppfd"
+run mcdt1.ppfd
+chk "mc: 2E3(1) floor"   "$(logval 'absorbed by walls')" 0.2193839 4e-3
+sed -e 's/^photoperiod/montecarlo = 4000000 11\nphotoperiod/' -e 's/^canopy = 0.25 0.05 2.0/canopy = 0.25 0.05 1.0/' \
+	"$SRC/difftrans.ppfd" > "$WORK/mcdt05.ppfd"
+run mcdt05.ppfd
+chk "mc: 2E3(0.5) floor" "$(logval 'absorbed by walls')" 0.4432087 3e-3
+sed -e 's/^photoperiod/montecarlo = 4000000 11\nphotoperiod/' -e 's/^canopy = 0.25 0.05 2.0/canopy = 0.25 0.05 6.0/' \
+	"$SRC/difftrans.ppfd" > "$WORK/mcdt3.ppfd"
+run mcdt3.ppfd
+chk "mc: 2E3(3) floor"   "$(logval 'absorbed by walls')" 0.0178613 1.5e-2
+# 無吸収葉 (ω = 1) は 1 光子も吸収しない (構造的に厳密)。白壁なら収支も厳密
+sed -e 's/^material = blackleaf gray 0.0 0.0/material = blackleaf gray 0.5 0.5\nmaterial = white gray 0.7/' \
+    -e 's/^wall     = all black/wall = all white/' -e 's/^photoperiod/montecarlo = 1000000 5\nphotoperiod/' \
+	"$SRC/canopy.ppfd" > "$WORK/mcw1.ppfd"
+run mcw1.ppfd
+chkabs "mc: omega=1 no capture" "$(logval 'absorbed by canopy')" 0
+chkabs "mc: white cavity closure" "$(logval 'closure error')" 1e-12
+# 白いキャビティ (cavity.ppfd) : 光子追跡 = ラジオシティ (ラジオシティの離散化の分)
+run cavity.ppfd
+cavd=$(sumval 14)
+sed 's/^photoperiod/montecarlo = 1000000 5\nphotoperiod/' "$SRC/cavity.ppfd" > "$WORK/mccav.ppfd"
+run mccav.ppfd
+chk "mc: == radiosity (white cavity)" "$(sumval 14)" "$cavd" 1e-2
+# 光沢反射 : ローブの指数を大きくすると鏡面に一致する (mirror5.ppfd の鏡面 2 面)
+sed 's/^specbounce .*/montecarlo = 4000000 3/' "$SRC/mirror5.ppfd" > "$WORK/mcm5.ppfd"
+run mcm5.ppfd
+mcs=$(sumval 5)
+sed 's/^material = mirror gray 0.0 specular 1.0/material = mirror gray 0.0 glossy 1.0 1e7/' "$WORK/mcm5.ppfd" > "$WORK/mcm5g.ppfd"
+run mcm5g.ppfd
+chk "mc: glossy n->inf == mirror" "$(sumval 5)" "$mcs" 3e-3
+chkabs "mc: glossy closure" "$(logval 'closure error')" 1e-12
+# 光沢の幅を広げると鏡面の像がぼける (同じ光子の数で、鏡像の向きの集中が下がる) :
+# 収支は厳密のまま
+sed 's/^material = mirror gray 0.0 specular 1.0/material = mirror gray 0.0 glossy 0.9 20/' "$WORK/mcm5.ppfd" > "$WORK/mcm5g20.ppfd"
+run mcm5g20.ppfd
+chkabs "mc: glossy n=20 closure" "$(logval 'closure error')" 1e-12
+# 決定論の解法では光沢を受け付けない (ラジオシティは放射輝度が向きによらない前提)
+sed 's/^material = mirror gray 0.0 specular 1.0/material = mirror gray 0.0 glossy 1.0 100/' "$SRC/mirror5.ppfd" > "$WORK/detglossy.ppfd"
+if (cd "$WORK" && "$OPPFD" detglossy.ppfd > /dev/null 2>&1); then
+	echo "mc: glossy w/o montecarlo rejected -> NG (accepted)" >&2
+	status=1
+else
+	echo "mc: glossy w/o montecarlo rejected -> OK"
+fi
+# 棚板の鏡面 (決定論では弾く) も光子追跡なら扱える : 収支は厳密
+sed -e 's/^occluder = plate .*/occluder = plate 0.7 0.9 0.3 0.7 0.57 0.57 mfilm div 4 4/' \
+    -e 's/^material = mirror gray 0.0 specular 1.0/material = mirror gray 0.0 specular 1.0\nmaterial = mfilm gray 0.05 specular 0.9/' \
+    -e 's/^specbounce .*/montecarlo = 1000000 3/' "$SRC/mirror6.ppfd" > "$WORK/mcocc.ppfd"
+run mcocc.ppfd
+chkabs "mc: specular shelf closure" "$(logval 'closure error')" 1e-12
+# 群落の横方向の散乱 (mclateral.ppfd) : 通路の鉛直面はベッドの側面からの散乱光を
+# 受ける (黒葉より明るい)。決定論の二流 (鉛直 1 次元) は横に出さない (黒葉と同じ)
+run mclateral.ppfd
+lat1=$(sumrow aisle 5)
+sed 's/^material = leaf  gray 0.25 0.25/material = leaf  gray 0.0 0.0/' "$SRC/mclateral.ppfd" > "$WORK/mclat0.ppfd"
+run mclat0.ppfd
+lat0=$(sumrow aisle 5)
+awk -v a="$lat1" -v b="$lat0" 'BEGIN {
+	r = a / b;
+	printf "%-28s scatter/black = %.4f -> %s (must be > 1.1)\n", "mc: lateral scattering to aisle", r, (r > 1.1) ? "OK" : "NG";
+	exit (r > 1.1) ? 0 : 1}' || status=1
+sed 's/^montecarlo.*//' "$WORK/mclat0.ppfd" > "$WORK/detlat0.ppfd"
+run detlat0.ppfd
+chk "mc: black leaf == deterministic" "$lat0" "$(sumrow aisle 5)" 1.5e-2
+
 echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2
