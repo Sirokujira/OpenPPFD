@@ -84,6 +84,15 @@ void output_log(ppfd_t *p)
 		plog(p, "occluder     : %-10s x %g..%g, y %g..%g, z %g..%g m, %s\n",
 			o->name, o->x0, o->x1, o->y0, o->y1, o->z0, o->z1, p->mat[o->imat].name);
 	}
+	for (ie = 0; ie < p->ncyl; ie++) {
+		/* 曲面は内接多角形で近似している : 弦と円弧の最大のずれ (サジタ) を出す */
+		const cyl_t *cy = &p->cyl[ie];
+		const double da = (cy->a1 - cy->a0) / cy->nseg * (PI / 180.0);
+		plog(p, "cylinder     : %-10s R = %g m, arc %g..%g deg, %d flat panels "
+			"(inscribed polygon : sagitta %.3g m = %.2g R)\n",
+			cy->name, cy->r, cy->a0, cy->a1, cy->nseg,
+			cy->r * (1.0 - cos(0.5 * da)), 1.0 - cos(0.5 * da));
+	}
 	for (ie = 0; ie < p->npanel; ie++) {
 		const panel_t *pn = &p->panel[ie];
 		const vec3_t p1 = v_add(pn->org, pn->eu), p3 = v_add(pn->org, pn->ev);

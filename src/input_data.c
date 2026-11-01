@@ -484,6 +484,7 @@ int input_data(FILE *fp, ppfd_t *p)
 	char  *token[MAXTOKEN];
 	const char sep[] = " \t";
 	int    cmat = 0, cspec = 0, cemit = 0, ctarget = 0, cband = 0, cocc = 0, cslab = 0, cpanel = 0;
+	int    ccyl = 0;
 	int    i;
 	double *ax_lam = NULL, *ax_v = NULL, *ax_v2 = NULL;
 	int    nax = 0;
@@ -875,6 +876,86 @@ int input_data(FILE *fp, ppfd_t *p)
 			pn.n = v_scale(c, 1.0 / an);
 			APPEND(p->panel, p->npanel, cpanel, panel_t);
 			p->panel[p->npanel++] = pn;
+		}
+		else if (!strcmp(token[0], "cylinder")) {
+			/*
+			cylinder = name x0 y0 z0  x1 y1 z1  R nseg material [arc a0 a1] [div nu nv]
+			軸 p0 -> p1、半径 R の円柱 (arc を書けば角度 a0..a1 [deg] の円弧 =
+			反射フード・半割りの管) を、内接する nseg 枚の長方形の板に分ける。
+			角度の基準は軸に直交する「上」(+z を軸に直交させた向き。軸が z に
+			平行なら +x)、向きは軸 p0 -> p1 のまわりの右ねじ。両端は開いた管
+			(中空) で、板は両面 (panel と同じ)。分割の既定は軸方向 patchdiv、
+			弦方向 1。
+			*/
+			cyl_t  cy;
+			vec3_t a0, a1, ax, e1, e2;
+			double len, r, d0 = 0.0, d1 = 360.0;
+			int    nseg, im, k, nu = 0, nv = 1, it;
+			if (ntok < 12) { fprintf(stderr, "*** invalid cylinder data\n"); ierr = 1; continue; }
+			memset(&cy, 0, sizeof(cy));
+			strncpy(cy.name, token[2], NAMELEN - 1);
+			a0 = v_make(atof(token[3]), atof(token[4]), atof(token[5]));
+			a1 = v_make(atof(token[6]), atof(token[7]), atof(token[8]));
+			r = atof(token[9]);
+			nseg = atoi(token[10]);
+			im = find_mat(p, token[11]);
+			if (im < 0) {
+				fprintf(stderr, "*** unknown material : %s\n", token[11]);
+				ierr = 1;
+				continue;
+			}
+			for (it = 12; it < ntok; it++) {
+				if (streq_ci(token[it], "arc") && (it + 2 < ntok)) {
+					d0 = atof(token[it + 1]);
+					d1 = atof(token[it + 2]);
+					it += 2;
+				}
+				else if (streq_ci(token[it], "div") && (it + 2 < ntok)) {
+					nu = atoi(token[it + 1]);
+					nv = atoi(token[it + 2]);
+					it += 2;
+				}
+			}
+			ax = v_sub(a1, a0);
+			len = v_norm(ax);
+			if ((len <= 0.0) || (r <= 0.0) || (nseg < 1) || (d1 <= d0) || ((d1 - d0) > 360.0 + 1e-9)) {
+				fprintf(stderr, "*** invalid cylinder data : %s\n", cy.name);
+				ierr = 1;
+				continue;
+			}
+			ax = v_scale(ax, 1.0 / len);
+			/* 角度の基準 e1 (軸に直交する「上」) と e2 = 軸 x e1 */
+			e1 = (fabs(ax.z) < 0.999) ? v_make(0.0, 0.0, 1.0) : v_make(1.0, 0.0, 0.0);
+			e1 = v_sub(e1, v_scale(ax, v_dot(e1, ax)));
+			e1 = v_scale(e1, 1.0 / v_norm(e1));
+			e2 = v_cross(ax, e1);
+			cy.r = r;
+			cy.a0 = d0;
+			cy.a1 = d1;
+			cy.nseg = nseg;
+			cy.ipanel0 = p->npanel;
+			for (k = 0; k < nseg; k++) {
+				const double ta = (d0 + ((d1 - d0) * k / nseg)) * (PI / 180.0);
+				const double tb = (d0 + ((d1 - d0) * (k + 1) / nseg)) * (PI / 180.0);
+				const vec3_t va = v_add(v_scale(e1, r * cos(ta)), v_scale(e2, r * sin(ta)));
+				const vec3_t vb = v_add(v_scale(e1, r * cos(tb)), v_scale(e2, r * sin(tb)));
+				panel_t pn;
+				vec3_t  c;
+				memset(&pn, 0, sizeof(pn));
+				snprintf(pn.name, NAMELEN, "%s.%d", cy.name, k);
+				pn.org = v_add(a0, va);
+				pn.eu  = v_sub(a1, a0);
+				pn.ev  = v_sub(vb, va);
+				pn.imat = im;
+				pn.ndivu = nu;
+				pn.ndivv = nv;
+				c = v_cross(pn.eu, pn.ev);
+				pn.n = v_scale(c, 1.0 / v_norm(c));
+				APPEND(p->panel, p->npanel, cpanel, panel_t);
+				p->panel[p->npanel++] = pn;
+			}
+			APPEND(p->cyl, p->ncyl, ccyl, cyl_t);
+			p->cyl[p->ncyl++] = cy;
 		}
 		else if (!strcmp(token[0], "canopy")) {
 			int    im;

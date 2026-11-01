@@ -171,6 +171,17 @@ typedef struct {
 	int     ndivu, ndivv;           /* eu / ev 方向の分割数 (0 = patchdiv に従う) */
 } panel_t;
 
+/* ---- 円柱・円弧の面 (cylinder キー : 斜めの板 nseg 枚で近似する) ------
+円柱の軸 p0 -> p1、半径 R、角度 a0..a1 [deg] の円弧を、内接する nseg 枚の
+長方形の板 (panel) に分けて置く。曲面そのものではなく内接多角形なので、
+弦と円弧のずれ (サジタ R (1 - cos(Δa/2))) をログに出す。 */
+typedef struct {
+	char    name[NAMELEN];
+	double  r, a0, a1;              /* 半径 [m]、角度範囲 [deg] */
+	int     nseg;                   /* 板の枚数 */
+	int     ipanel0;                /* 最初の板の番号 (panel[ipanel0 .. +nseg-1]) */
+} cyl_t;
+
 /* ---- 群落スラブ 1 枚 (多段ラックでは段ごとに、栽培ベッドごとに置ける) - */
 typedef struct {
 	double  ztop, zbot;             /* ztop > zbot */
@@ -225,6 +236,8 @@ typedef struct {
 	photdist_t *dist;
 	occluder_t *occ;
 	panel_t   *panel;               /* [npanel] 斜めの板 */
+	int        ncyl;
+	cyl_t     *cyl;                 /* [ncyl] 円柱・円弧 (板は panel に入っている) */
 	cslab_t   *slab;                /* [nslab] 群落スラブ (z の昇順、重なりなし) */
 	canopy_t  canopy;
 

@@ -858,6 +858,54 @@ chkabs "facing: equiv. in canopy"    "$(maxdiff map_m10mid.csv ppfd_map_mid.csv)
 chkabs "facing: equiv. below canopy" "$(maxdiff map_m10below.csv ppfd_map_below.csv)" 1e-6
 chk "facing: canopy absorption" "$m10c" "$(awk -v a="$(logval 'absorbed by canopy')" 'BEGIN {printf "%.9g", a / 2}')" 1e-5
 
+echo "== (z) cylinders and arcs (inscribed polygon of flat panels) =="
+# cylinder.ppfd : 壁から壁まで渡した黒い 16 面の管の真上の点光源。
+# 軸からの距離 0.50 R の光線は必ず遮られ、1.47 R の光線は必ず通る
+run cylinder.ppfd
+chkabs "cylinder: shadowed (d = 0.50 R)" "$(sumrow c 5)" 0
+chk "cylinder: clear (d = 1.47 R)" "$(sumrow o 5)" 0.5477301 1e-6
+if grep -q "cylinder     : rod .* 16 flat panels (inscribed polygon : sagitta" "$WORK/ppfd.log"; then
+	echo "cylinder: sagitta logged -> OK"
+else
+	echo "cylinder: sagitta logged -> NG" >&2
+	status=1
+fi
+# 4 面・45° 始まりの筒 = 同じ断面の occluder の箱 (白い壁・白い管。壁パッチの
+# 境界が箱の辺に乗るよう patchdiv 10、面の分割もそろえる)。箱は slab 法、
+# 板は平行四辺形の交差で遮蔽を判定するので、辺をかすめる光線の分だけ違う
+sed -e 's/^patchdiv   = 6 6/patchdiv   = 10 10/' -e 's/^wall     = all black/wall     = all white/' \
+    -e 's/^cylinder = .*/cylinder = rod  0.5 0.0 0.5  0.5 1.0 0.5  0.1414213562373095 4 white arc 45 405 div 10 10/' \
+	"$SRC/cylinder.ppfd" > "$WORK/cylprism.ppfd"
+run cylprism.ppfd
+chkabs "cylinder: prism closure" "$(logval 'closure error')" 2e-3
+cp "$WORK/ppfd_map_floor.csv" "$WORK/map_cylprism.csv"
+sed -e 's/^patchdiv   = 6 6/patchdiv   = 10 10/' -e 's/^wall     = all black/wall     = all white/' \
+    -e 's/^cylinder = .*/occluder = box 0.4 0.6 0.0 1.0 0.4 0.6 white div 10 10/' \
+	"$SRC/cylinder.ppfd" > "$WORK/cylbox.ppfd"
+run cylbox.ppfd
+chkabs "cylinder: 4-gon == box" "$(maxdiff map_cylprism.csv ppfd_map_floor.csv)" 1e-3
+# 半割りの反射フード (光源の上の円弧 180°、白) も板として収支に入る。
+# 開口から中を見るパッチ対の可視率の標本化が残差を決める (-1.7e-3)
+sed -e 's/^wall     = all black/wall     = all white/' \
+    -e 's/^led = .*/led = 0.5 0.5 0.62 1.0 na555 iso/' \
+    -e 's/^cylinder = .*/cylinder = hood 0.5 0.1 0.6  0.5 0.9 0.6  0.15 8 white arc -90 90/' \
+	"$SRC/cylinder.ppfd" > "$WORK/cylhood.ppfd"
+run cylhood.ppfd
+chkabs "cylinder: half-pipe hood closure" "$(logval 'closure error')" 3e-3
+# 退化した管 (半径 0 / 長さ 0) とチャンバからはみ出す管は入力段で弾く
+for v in r0 out; do
+	case $v in
+	r0)  sed 's/^cylinder = .*/cylinder = rod  0.5 0.0 0.5  0.5 1.0 0.5  0.0 16 black/' "$SRC/cylinder.ppfd" > "$WORK/cyl_$v.ppfd" ;;
+	out) sed 's/^cylinder = .*/cylinder = rod  0.5 0.0 0.5  0.5 1.0 0.5  0.6 16 black/' "$SRC/cylinder.ppfd" > "$WORK/cyl_$v.ppfd" ;;
+	esac
+	if (cd "$WORK" && "$OPPFD" "cyl_$v.ppfd" > /dev/null 2>&1); then
+		echo "cylinder: invalid ($v) rejected -> NG (accepted)" >&2
+		status=1
+	else
+		echo "cylinder: invalid ($v) rejected -> OK"
+	fi
+done
+
 echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2
