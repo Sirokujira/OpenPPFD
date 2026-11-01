@@ -1255,6 +1255,44 @@ for v in iso tilt shelf box out; do
 	fi
 done
 
+echo "== (ag) leafscatter canopy crossed by an occluder (rejected; split the canopy instead) =="
+# 散乱場はスラブごとに 1 本の鉛直カラムなので、群落を横切る棚板があると散乱光が
+# カラムの中を通って棚板の向こうへ出ていた (光源が棚板の下だけでも上の測定面に
+# 0.11 umol/m2/s)。棚板の高さで群落を 2 枚に割れば段として扱え、上は厳密に 0
+sed -e 's/^canopy = 0.75 0.55 1.5 0.5 leaf/canopy = 0.75 0.55 1.5 0.5 leaf/' \
+    -e '/^led = 0.6 0.4 0.95/d' -e 's/^canopy = 0.25 0.05 2.0 0.5 leaf/canopy = 0.50 0.05 2.0 0.5 leaf\ncanopy = 0.75 0.50 1.5 0.5 leaf/' \
+    -e '/^canopy = 0.75 0.55/d' "$SRC/rack3.ppfd" > "$WORK/crossbad.ppfd"
+sed -e '/^canopy = 0.75 0.50/d' -e 's/^canopy = 0.50 0.05 2.0 0.5 leaf/canopy = 0.75 0.05 2.0 0.5 leaf/' \
+	"$WORK/crossbad.ppfd" > "$WORK/crossbad1.ppfd"
+if (cd "$WORK" && "$OPPFD" crossbad1.ppfd > /dev/null 2>&1); then
+	echo "cross: shelf through canopy rejected -> NG (accepted)" >&2
+	status=1
+else
+	echo "cross: shelf through canopy rejected -> OK"
+fi
+run crossbad.ppfd
+chkabs "cross: split canopy, none above shelf" "$(sumrow b_top 5)" 0
+chkabs "cross: split canopy closure" "$(logval 'closure error')" 1e-6
+# 光子追跡は群落を 3 次元で追うので受け付ける (棚板の上は厳密に 0)
+sed 's/^photoperiod/montecarlo = 200000 1\nphotoperiod/' "$WORK/crossbad1.ppfd" > "$WORK/crossmc.ppfd"
+run crossmc.ppfd
+chkabs "cross: monte carlo, none above shelf" "$(sumrow b_top 5)" 0
+# 箱・鉛直な仕切り・斜めの板が群落の中を通る置き方も弾く
+for v in box divider panel; do
+	case $v in
+	box)     o='occluder = box 0.3 0.6 0.3 0.6 0.10 0.20 white' ;;
+	divider) o='occluder = wall2 0.7 0.7 0 1 0 0.5 white' ;;
+	panel)   o='panel = p 0.2 0.2 0.15  0.8 0.2 0.15  0.2 0.8 0.15 white' ;;
+	esac
+	sed "s/^occluder = shelf .*/&\n$o/" "$SRC/rack3.ppfd" > "$WORK/crossbad_$v.ppfd"
+	if (cd "$WORK" && "$OPPFD" "crossbad_$v.ppfd" > /dev/null 2>&1); then
+		echo "cross: $v through canopy rejected -> NG (accepted)" >&2
+		status=1
+	else
+		echo "cross: $v through canopy rejected -> OK"
+	fi
+done
+
 echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2

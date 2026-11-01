@@ -687,6 +687,46 @@ static int check_emitter_surfaces(const ppfd_t *p)
 	return 0;
 }
 
+/*
+平行四辺形 (斜めの板) を箱 lo..hi で切り取った多角形の面積。3 次元の
+Sutherland-Hodgman で 6 枚の半空間に順に切る (凸多角形なので頂点は 1 枚
+ごとに高々 1 個増え、4 + 6 = 10 個で足りる)。
+*/
+static double panel_box_area(const panel_t *pn, const double *lo, const double *hi)
+{
+	vec3_t a[16], b[16];
+	int    na = 4, nb, k, e;
+	double area;
+	vec3_t s = v_make(0, 0, 0);
+
+	a[0] = pn->org;
+	a[1] = v_add(pn->org, pn->eu);
+	a[2] = v_add(a[1], pn->ev);
+	a[3] = v_add(pn->org, pn->ev);
+	for (e = 0; e < 6; e++) {
+		const int ax = e / 2;
+		const double lim = (e % 2) ? hi[ax] : lo[ax];
+		nb = 0;
+		for (k = 0; k < na; k++) {
+			const vec3_t p0 = a[k], p1 = a[(k + 1) % na];
+			const double c0 = (ax == 0) ? p0.x : ((ax == 1) ? p0.y : p0.z);
+			const double c1 = (ax == 0) ? p1.x : ((ax == 1) ? p1.y : p1.z);
+			const double d0 = (e % 2) ? (lim - c0) : (c0 - lim);
+			const double d1 = (e % 2) ? (lim - c1) : (c1 - lim);
+			if (d0 >= 0.0) b[nb++] = p0;
+			if ((d0 >= 0.0) != (d1 >= 0.0)) b[nb++] = v_add(p0, v_scale(v_sub(p1, p0), d0 / (d0 - d1)));
+		}
+		na = nb;
+		for (k = 0; k < na; k++) a[k] = b[k];
+		if (na < 3) return 0.0;
+	}
+	for (k = 1; k + 1 < na; k++) {
+		s = v_add(s, v_cross(v_sub(a[k], a[0]), v_sub(a[k + 1], a[0])));
+	}
+	area = 0.5 * v_norm(s);
+	return area;
+}
+
 int input_data(FILE *fp, ppfd_t *p)
 {
 	int    nline = 0, ierr = 0;
@@ -1571,6 +1611,58 @@ int input_data(FILE *fp, ppfd_t *p)
 			    経路を持たない)。床・天井・トレイに乗るのは可 (上の resttop / restbot)
 			*/
 			const int zmir = (p->mat[p->wallmat[4]].rhos > 0.0) || (p->mat[p->wallmat[5]].rhos > 0.0);
+			/*
+			群落の中を通る遮蔽物・斜めの板は弾く。散乱場はスラブごとに 1 本の鉛直
+			カラムで、カラムの中に遮るものを持たないので、群落を横切る棚板があると
+			散乱光がカラムの中を通って棚板の向こうへ出る (光源が棚板の下だけでも
+			上の測定面に 0.11 umol/m2/s)。棚板の高さで群落を 2 枚に割れば段として
+			正しく扱える (面が棚板に乗る : 検証 (ad))。光子追跡 (montecarlo) は
+			群落を 3 次元で追うのでこの制限は無い。
+			*/
+			if (p->mc_n <= 0) {
+				const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+				int io;
+				for (j = 0; j < p->nslab; j++) {
+					const cslab_t *c = &p->slab[j];
+					const double slo[3] = {c->x0, c->y0, c->zbot}, shi[3] = {c->x1, c->y1, c->ztop};
+					for (io = 0; io < p->nocc; io++) {
+						const occluder_t *o = &p->occ[io];
+						const double lo[3] = {o->x0, o->y0, o->z0}, hi[3] = {o->x1, o->y1, o->z1};
+						int ax, in = 1;
+						for (ax = 0; ax < 3; ax++) {
+							if (hi[ax] - lo[ax] <= 1e-12) {
+								/* 厚さ 0 の向き : 板の平面が群落の内側を通るか */
+								if (!((lo[ax] > slo[ax] + tol) && (lo[ax] < shi[ax] - tol))) in = 0;
+							}
+							else {
+								const double w = ((hi[ax] < shi[ax]) ? hi[ax] : shi[ax]) - ((lo[ax] > slo[ax]) ? lo[ax] : slo[ax]);
+								if (w <= tol) in = 0;
+							}
+						}
+						if (in) {
+							fprintf(stderr, "*** leafscatter : occluder \"%s\" passes through the canopy z = %g..%g\n",
+								o->name, c->zbot, c->ztop);
+							fprintf(stderr, "    (split the canopy at the occluder into separate canopy lines, "
+								"or use montecarlo)\n");
+							return 1;
+						}
+					}
+					for (io = 0; io < p->npanel; io++) {
+						double ilo[3], ihi[3];
+						int ax;
+						for (ax = 0; ax < 3; ax++) {
+							ilo[ax] = slo[ax] + tol;
+							ihi[ax] = shi[ax] - tol;
+						}
+						if (panel_box_area(&p->panel[io], ilo, ihi) > tol * tol) {
+							fprintf(stderr, "*** leafscatter : panel \"%s\" passes through the canopy z = %g..%g\n",
+								p->panel[io].name, c->zbot, c->ztop);
+							fprintf(stderr, "    (split the canopy at the panel, move the panel out, or use montecarlo)\n");
+							return 1;
+						}
+					}
+				}
+			}
 			/*
 			面が何かに乗っているか。同一平面で向かい合う面 (床・棚板の上面など)
 			が面を全部覆えば、面から出る散乱光はそのパッチがそのまま受け、面は
