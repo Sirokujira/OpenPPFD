@@ -445,6 +445,15 @@ void direct_patch(ppfd_t *p)
 		unsigned char *vflag = occ_any(p) ? (unsigned char *)xcalloc((size_t)p->nemit, 1) : NULL;
 		int edge = 0, ie, i;
 
+		if (p->pcov[ip]) {
+			/* 接して覆われたパッチには光が届かない (E = 0、預け入れも 0) */
+			free(vflag);
+			free(tmp);
+			if (dtmp != NULL) free(dtmp);
+			if (seg != NULL) free(seg);
+			continue;
+		}
+
 		/*
 		群落散乱が有効なら、このパッチへ向かう光束が層へ預ける分を集める。
 		パッチ i に届くはずの放射束は A_i * (減衰前の面積平均放射照度) なので、

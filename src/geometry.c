@@ -28,26 +28,37 @@ exp(-G·LAI/cosθ) に一致する (鉛直入射 s = LAI/a のとき exp(-G·LAI
 任意の向きの平行四辺形 (厚さ 0 の両面板)。表裏 2 面をパッチにし、遮蔽は
 「線分と平行四辺形の交差」で判定する (外接箱では代用しない)。
 
-面が壁と同一平面で接する置き方 (床の上に厚さのある箱を直に置く等) は
-避けること。同一平面のパッチどうしは互いに見えないものとして落とすので、
-その隙間に光が消える。棚板は厚さ 0 の板として与えるのが確実。
+■ 接触線への格子のそろえ (snap_cuts)
+遮蔽物が壁や別の遮蔽物の面に接する置き方 (床に直に置いた箱、側壁に接する
+棚板、棚板に載せた箱) では、面のパッチが「接触していて光が届かない部分」と
+「キャビティに面した部分」をまたぐことがある。パッチの放射発散度は一様なので、
+またいだパッチは接触部分のぶんまで放射したことになり、その光はどこへも
+届かず消える (床に置いた箱で収支 -1.7%)。また側壁のパッチが断面いっぱいの
+棚板をまたぐと、そのパッチ 1 枚を通して上下の段の間に光が漏れる。
+そこで、面に接する遮蔽物の外形の線 (接触線) に面の格子線をそろえる。
+最寄りの格子線を接触線へ動かし (半セル以内)、動かせなければ挿入する。
+接触線が無い面の格子は従来と 1 ビットも変わらない。動かした / 挿入した
+本数はログに出す。
 */
 
 #include "ppfd.h"
 
-/* 矩形面を nu × nv のパッチに分割して追加する。戻り値 = 次のパッチ番号 */
+/*
+矩形面を nu × nv のパッチに分割して追加する。cu[0..nu] / cv[0..nv] は辺に
+沿った分割点の割合 (等分なら k/n)。戻り値 = 次のパッチ番号
+*/
 static int add_face(patch_t *pt, int k, vec3_t org, vec3_t ue, vec3_t ve, vec3_t nrm,
-                    int nu, int nv, int imat, int iface)
+                    int nu, int nv, const double *cu, const double *cv, int imat, int iface)
 {
 	int iu, iv;
 
 	for (iv = 0; iv < nv; iv++) {
 		for (iu = 0; iu < nu; iu++) {
 			patch_t *q = &pt[k++];
-			const double a0 = (double)iu / nu;
-			const double a1 = (double)(iu + 1) / nu;
-			const double b0 = (double)iv / nv;
-			const double b1 = (double)(iv + 1) / nv;
+			const double a0 = cu[iu];
+			const double a1 = cu[iu + 1];
+			const double b0 = cv[iv];
+			const double b1 = cv[iv + 1];
 			q->p[0] = v_add(org, v_add(v_scale(ue, a0), v_scale(ve, b0)));
 			q->p[1] = v_add(org, v_add(v_scale(ue, a1), v_scale(ve, b0)));
 			q->p[2] = v_add(org, v_add(v_scale(ue, a1), v_scale(ve, b1)));
@@ -109,11 +120,97 @@ static int occ_face_used(const occluder_t *o, int f)
 	return 1;
 }
 
+static double vcomp(vec3_t v, int a)
+{
+	return (a == 0) ? v.x : ((a == 1) ? v.y : v.z);
+}
+
+/* 軸並行なベクトルの軸 (0..2) */
+static int vaxis(vec3_t v)
+{
+	if (fabs(v.x) > 0.0) return 0;
+	if (fabs(v.y) > 0.0) return 1;
+	return 2;
+}
+
+/*
+軸並行な矩形面 (原点 org、2 辺 ue, ve) に接する遮蔽物の外形の線を、ue / ve
+方向の割合 (0, 1) として cu / cv に足す。接する = 遮蔽物の法線方向の範囲が
+面の平面を含み (接するのも含む)、面内の範囲が面と重なるか接する。owner は
+面の持ち主の遮蔽物 (自分自身は数えない。壁の面なら -1)。
+*/
+static void face_contacts(const ppfd_t *p, int owner, vec3_t org, vec3_t ue, vec3_t ve,
+                          double *cu, int *ncu, double *cv, int *ncv)
+{
+	const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+	const int au = vaxis(ue), av = vaxis(ve), an = 3 - au - av;
+	const double ou = vcomp(org, au), ov = vcomp(org, av), w = vcomp(org, an);
+	const double lu = vcomp(ue, au), lv = vcomp(ve, av);
+	int io, s;
+
+	for (io = 0; io < p->nocc; io++) {
+		const occluder_t *o = &p->occ[io];
+		const vec3_t lo = v_make(o->x0, o->y0, o->z0), hi = v_make(o->x1, o->y1, o->z1);
+		const double lou = vcomp(lo, au), hiu = vcomp(hi, au);
+		const double lov = vcomp(lo, av), hiv = vcomp(hi, av);
+		if (io == owner) continue;
+		if ((vcomp(lo, an) > w + tol) || (vcomp(hi, an) < w - tol)) continue;
+		if ((hiu < ou - tol) || (lou > ou + lu + tol) || (hiv < ov - tol) || (lov > ov + lv + tol)) continue;
+		for (s = 0; s < 2; s++) {
+			const double fu = (((s == 0) ? lou : hiu) - ou) / lu;
+			const double fv = (((s == 0) ? lov : hiv) - ov) / lv;
+			if ((fu * lu > tol) && ((1.0 - fu) * lu > tol)) cu[(*ncu)++] = fu;
+			if ((fv * lv > tol) && ((1.0 - fv) * lv > tol)) cv[(*ncv)++] = fv;
+		}
+	}
+}
+
+/*
+n 等分の分割点 cut[0..n] (= k/n) を接触線 c[0..nc-1] にそろえる。最寄りの
+内側の分割点が半セル以内でまだ動かしていなければそこへ動かし、そうでなければ
+挿入する。すでに分割点に乗っている接触線は何もしない (等分の値のまま)。
+cut の大きさは n + nc + 1 以上。戻り値 = 分割数。
+*/
+static int snap_cuts(double *cut, int n, const double *c, int nc, double tol, int *nmoved, int *nins)
+{
+	int *moved = (int *)xcalloc((size_t)(n + 1), sizeof(int));
+	int  m = n + 1, k, i, j;
+
+	for (k = 0; k <= n; k++) cut[k] = (double)k / n;
+	for (i = 0; i < nc; i++) {
+		int on = 0;
+		for (j = 0; j < m; j++) {
+			if (fabs(cut[j] - c[i]) <= tol) on = 1;
+		}
+		if (on) continue;
+		k = (int)floor((c[i] * n) + 0.5);
+		if ((k >= 1) && (k <= n - 1) && !moved[k] && (fabs(((double)k / n) - c[i]) <= (0.5 / n) + tol)) {
+			cut[k] = c[i];
+			moved[k] = 1;
+			(*nmoved)++;
+		}
+		else {
+			cut[m++] = c[i];
+			(*nins)++;
+		}
+	}
+	/* 挿入した点を並べ直す (件数は少ないので挿入ソート) */
+	for (i = 1; i < m; i++) {
+		const double t = cut[i];
+		for (j = i - 1; (j >= 0) && (cut[j] > t); j--) cut[j + 1] = cut[j];
+		cut[j + 1] = t;
+	}
+	free(moved);
+	return m - 1;
+}
+
 void setup_patch(ppfd_t *p)
 {
 	/* 面 : 原点 org と 2 辺 ue, ve。ue × ve が内向き法線を向くよう並べる */
 	vec3_t org[6], ue[6], ve[6], nrm[6];
-	int    f, k, io, n;
+	int    f, k, io, n, g, nface, cap;
+	double *cuts, *cl;
+	int    *nfu, *nfv;
 
 	org[0] = v_make(0,     0,     0);      ue[0] = v_make(0, p->Ly, 0); ve[0] = v_make(0, 0, p->Lz); nrm[0] = v_make( 1, 0, 0);
 	org[1] = v_make(p->Lx, 0,     0);      ue[1] = v_make(0, 0, p->Lz); ve[1] = v_make(0, p->Ly, 0); nrm[1] = v_make(-1, 0, 0);
@@ -127,16 +224,60 @@ void setup_patch(ppfd_t *p)
 	for (f = 0; f < 6; f++) {
 		if (p->wdivu[f] < 1) p->wdivu[f] = p->ndivu;
 		if (p->wdivv[f] < 1) p->wdivv[f] = p->ndivv;
-		n += p->wdivu[f] * p->wdivv[f];
 	}
 	for (io = 0; io < p->nocc; io++) {
 		occluder_t *o = &p->occ[io];
 		if (o->ndivu < 1) o->ndivu = p->ndivu;
 		if (o->ndivv < 1) o->ndivv = p->ndivv;
-		for (f = 0; f < 6; f++) {
-			if (occ_face_used(o, f)) n += o->ndivu * o->ndivv;
-		}
 	}
+
+	/*
+	面ごとの分割点 (壁 6 面 + 遮蔽物 6 面ずつ)。接触線にそろえる (snap_cuts)。
+	面 g の分割点は cuts[g] の先頭 (nfu[g] + 1 個) と cuts[g] + cap の先頭。
+	*/
+	nface = 6 + (6 * p->nocc);
+	cap = (2 * p->nocc) + 1;
+	for (f = 0; f < 6; f++) {
+		if (p->wdivu[f] + 1 > cap) cap = p->wdivu[f] + 1;
+		if (p->wdivv[f] + 1 > cap) cap = p->wdivv[f] + 1;
+	}
+	for (io = 0; io < p->nocc; io++) {
+		if (p->occ[io].ndivu + 1 > cap) cap = p->occ[io].ndivu + 1;
+		if (p->occ[io].ndivv + 1 > cap) cap = p->occ[io].ndivv + 1;
+	}
+	cap += (2 * p->nocc) + 1;
+	cuts = (double *)xmalloc((size_t)nface * 2 * (size_t)cap * sizeof(double));
+	nfu = (int *)xcalloc((size_t)nface, sizeof(int));
+	nfv = (int *)xcalloc((size_t)nface, sizeof(int));
+	cl  = (double *)xmalloc((size_t)(2 * (2 * p->nocc + 1)) * sizeof(double));
+	p->nsnap_moved = 0;
+	p->nsnap_ins = 0;
+	for (g = 0; g < nface; g++) {
+		const double tol = 1e-12;
+		double *cu = &cuts[(size_t)g * 2 * cap];
+		double *cv = cu + cap;
+		double *clu = cl, *clv = cl + (2 * p->nocc + 1);
+		int     ncu = 0, ncv = 0, du, dv, owner;
+		vec3_t  fo, fu, fv, fn;
+		if (g < 6) {
+			fo = org[g]; fu = ue[g]; fv = ve[g];
+			du = p->wdivu[g]; dv = p->wdivv[g];
+			owner = -1;
+		}
+		else {
+			const occluder_t *o;
+			owner = (g - 6) / 6;
+			o = &p->occ[owner];
+			if (!occ_face_used(o, (g - 6) % 6)) continue;
+			occ_face(o, (g - 6) % 6, &fo, &fu, &fv, &fn);
+			du = o->ndivu; dv = o->ndivv;
+		}
+		face_contacts(p, owner, fo, fu, fv, clu, &ncu, clv, &ncv);
+		nfu[g] = snap_cuts(cu, du, clu, ncu, tol, &p->nsnap_moved, &p->nsnap_ins);
+		nfv[g] = snap_cuts(cv, dv, clv, ncv, tol, &p->nsnap_moved, &p->nsnap_ins);
+		n += nfu[g] * nfv[g];
+	}
+	free(cl);
 
 	for (io = 0; io < p->npanel; io++) {
 		panel_t *pn = &p->panel[io];
@@ -155,28 +296,82 @@ void setup_patch(ppfd_t *p)
 
 	k = 0;
 	for (f = 0; f < 6; f++) {
+		const double *cu = &cuts[(size_t)f * 2 * cap];
 		k = add_face(p->patch, k, org[f], ue[f], ve[f], nrm[f],
-			p->wdivu[f], p->wdivv[f], p->wallmat[f], f);
+			nfu[f], nfv[f], cu, cu + cap, p->wallmat[f], f);
 	}
 	for (io = 0; io < p->nocc; io++) {
 		const occluder_t *o = &p->occ[io];
 		for (f = 0; f < 6; f++) {
+			const int gf = 6 + (6 * io) + f;
+			const double *cu = &cuts[(size_t)gf * 2 * cap];
 			vec3_t fo, fu, fv, fn;
 			if (!occ_face_used(o, f)) continue;
 			occ_face(o, f, &fo, &fu, &fv, &fn);
 			/* iface は「同一平面どうしは見えない」判定に使うので面ごとに一意 */
 			k = add_face(p->patch, k, fo, fu, fv, fn,
-				o->ndivu, o->ndivv, o->imat, 6 + (6 * io) + f);
+				nfu[gf], nfv[gf], cu, cu + cap, o->imat, gf);
 		}
 	}
 	for (io = 0; io < p->npanel; io++) {
 		const panel_t *pn = &p->panel[io];
 		const int base = 6 + (6 * p->nocc) + (2 * io);
+		double *pu = (double *)xmalloc((size_t)(pn->ndivu + 1) * sizeof(double));
+		double *pv = (double *)xmalloc((size_t)(pn->ndivv + 1) * sizeof(double));
+		int     j;
+		for (j = 0; j <= pn->ndivu; j++) pu[j] = (double)j / pn->ndivu;
+		for (j = 0; j <= pn->ndivv; j++) pv[j] = (double)j / pn->ndivv;
 		/* 表 : eu x ev = n。裏は 2 辺を入れ替えて ev x eu = -n (格子は表と同じ) */
 		k = add_face(p->patch, k, pn->org, pn->eu, pn->ev, pn->n,
-			pn->ndivu, pn->ndivv, pn->imat, base);
+			pn->ndivu, pn->ndivv, pu, pv, pn->imat, base);
 		k = add_face(p->patch, k, pn->org, pn->ev, pn->eu, v_scale(pn->n, -1.0),
-			pn->ndivv, pn->ndivu, pn->imat, base + 1);
+			pn->ndivv, pn->ndivu, pv, pu, pn->imat, base + 1);
+		free(pu);
+		free(pv);
+	}
+	free(cuts);
+	free(nfu);
+	free(nfv);
+
+	/*
+	覆われたパッチ : 同一平面で向かい合う面 (壁・遮蔽物の面) の矩形の中に
+	重心があるパッチ。格子を接触線にそろえてあるので、パッチは全部覆われるか
+	全部覆われないかのどちらか。覆われたパッチには光が届かず、どこへも放射
+	しない (直接光・形態係数・群落の面の交換から外す)。厚い箱なら光線が箱の
+	内部を通るので遮られるが、厚さ 0 の板に載せた箱の底面や、床に寝かせた板の
+	下の床は、光線の端が板の面に乗るので遮られない : 明示的に外す。
+	*/
+	p->pcov = (unsigned char *)xcalloc((size_t)p->npatch, 1);
+	p->npcov = 0;
+	for (k = 0; k < p->npatch; k++) {
+		const patch_t *q = &p->patch[k];
+		const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+		const int an = (fabs(q->n.x) > 0.5) ? 0 : ((fabs(q->n.y) > 0.5) ? 1 : 2);
+		const double sg = vcomp(q->n, an);
+		const double w = vcomp(q->c, an);
+		const int a1 = (an + 1) % 3, a2 = (an + 2) % 3;
+		const double c1 = vcomp(q->c, a1), c2 = vcomp(q->c, a2);
+		const int owner = ((q->iface >= 6) && (q->iface < 6 + (6 * p->nocc))) ? ((q->iface - 6) / 6) : -1;
+		int cov = 0;
+		if (q->iface >= 6 + (6 * p->nocc)) continue;     /* 斜めの板は覆わない・覆われない */
+		/* 壁 : 内向き法線 -sg の面が平面 w にあるか (壁の矩形はチャンバの断面全体) */
+		if ((sg < 0.0) && (fabs(w) <= tol)) cov = 1;
+		if ((sg > 0.0) && (fabs(w - vcomp(v_make(p->Lx, p->Ly, p->Lz), an)) <= tol)) cov = 1;
+		if (owner < 0) cov = 0;                          /* 壁のパッチは壁に覆われない */
+		for (io = 0; (io < p->nocc) && !cov; io++) {
+			const occluder_t *o = &p->occ[io];
+			const vec3_t lo = v_make(o->x0, o->y0, o->z0), hi = v_make(o->x1, o->y1, o->z1);
+			/* 外向き法線が -sg の面 : sg > 0 なら min 側の面 (lo)、sg < 0 なら max 側の面 */
+			const double wf = (sg > 0.0) ? vcomp(lo, an) : vcomp(hi, an);
+			if (io == owner) continue;
+			if (fabs(wf - w) > tol) continue;
+			if ((c1 > vcomp(lo, a1) + tol) && (c1 < vcomp(hi, a1) - tol)
+			 && (c2 > vcomp(lo, a2) + tol) && (c2 < vcomp(hi, a2) - tol)) cov = 1;
+		}
+		if (cov) {
+			p->pcov[k] = 1;
+			p->npcov++;
+		}
 	}
 }
 

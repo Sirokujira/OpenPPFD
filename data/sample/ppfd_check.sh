@@ -1124,6 +1124,64 @@ for v in shelf tray; do
 	fi
 done
 
+echo "== (ae) occluders in contact (grid aligned to contact lines, covered patches excluded) =="
+# contact.ppfd : 側壁の格子線に乗らない z = 0.4 の棚板、光源は下だけ。
+# 側壁の格子線を棚板の高さへ動かすので、棚板の上は厳密に 0 (以前は 0.077 漏れていた)
+run contact.ppfd
+chkabs "contact: no leak above shelf" "$(sumrow above 5)" 0
+chkabs "contact: shelf closure" "$(logval 'closure error')" 1e-6
+if grep -q 'aligned to occluder contact lines : 4 lines moved' "$WORK/ppfd.log"; then
+	echo "contact: grid alignment logged -> OK"
+else
+	echo "contact: grid alignment logged -> NG" >&2
+	status=1
+fi
+# 面どうしの接触 : 光源を上へ移し、棚板を接触する遮蔽物に置き換えた変種の収支
+for v in block onshelf mat poster box; do
+	case $v in
+	block)   o='occluder = block 0 1 0 1 0.0 0.2 white' ; tol=1e-6 ;;
+	onshelf) o='occluder = shelf 0 1 0 1 0.5 0.5 white\noccluder = block 0 1 0 1 0.5 0.7 white' ; tol=1e-6 ;;
+	mat)     o='occluder = mat 0.2 0.7 0.15 0.85 0.0 0.0 white' ; tol=1e-6 ;;
+	poster)  o='occluder = poster 0.0 0.0 0.2 0.7 0.3 0.8 black' ; tol=1e-6 ;;
+	box)     o='occluder = tray 0.2 0.7 0.15 0.85 0.0 0.125 white' ; tol=3e-3 ;;
+	esac
+	sed -e "s/^occluder = .*/$o/" -e 's/^led = .*/led = 0.5 0.5 0.9 1.0 g iso/' "$SRC/contact.ppfd" > "$WORK/contact_$v.ppfd"
+	run "contact_$v.ppfd"
+	chkabs "contact: $v closure" "$(logval 'closure error')" "$tol"
+done
+# 床いっぱいの黒いマット = 黒い床 (覆われた床のパッチは外れ、マットの上面が床になる)
+sed -e 's/^occluder = .*/occluder = mat 0 1 0 1 0.0 0.0 black/' -e 's/^led = .*/led = 0.5 0.5 0.9 1.0 g iso/' \
+	"$SRC/contact.ppfd" > "$WORK/contact_fullmat.ppfd"
+run contact_fullmat.ppfd
+cp "$WORK/ppfd_map_below.csv" "$WORK/map_cmat.csv"
+sed -e '/^occluder = /d' -e 's/^led = .*/led = 0.5 0.5 0.9 1.0 g iso/' -e 's/^wall = all  white/&\nwall = zmin black/' \
+	"$SRC/contact.ppfd" > "$WORK/contact_blackfloor.ppfd"
+run contact_blackfloor.ppfd
+chkabs "contact: black mat == black floor" "$(maxdiff map_cmat.csv ppfd_map_below.csv)" 1e-6
+# 光子追跡でも同じ : 同じ t に床とマットの上面があるとき、覆われた床ではなくマットに当たる
+# (以前は床に当たり、白い床として反射していた : 床の近くの測定面 +26%)
+sed 's/^solver/montecarlo = 200000 1\nsolver/' "$WORK/contact_fullmat.ppfd" > "$WORK/contact_fullmatmc.ppfd"
+run contact_fullmatmc.ppfd
+cp "$WORK/ppfd_map_below.csv" "$WORK/map_cmatmc.csv"
+sed 's/^solver/montecarlo = 200000 1\nsolver/' "$WORK/contact_blackfloor.ppfd" > "$WORK/contact_blackfloormc.ppfd"
+run contact_blackfloormc.ppfd
+chkabs "contact: mc black mat == black floor" "$(maxdiff map_cmatmc.csv ppfd_map_below.csv)" 0
+# 弾く置き方 : 同じ平面で重なる板 / 体積の重なる箱 / 床に寝かせた斜めの板
+for v in plates boxes panel; do
+	case $v in
+	plates) o='occluder = a 0.2 0.7 0.15 0.85 0.3 0.3 white\noccluder = b 0.5 0.9 0.15 0.85 0.3 0.3 white' ;;
+	boxes)  o='occluder = a 0.2 0.7 0.15 0.85 0.3 0.4 white\noccluder = b 0.5 0.9 0.15 0.85 0.3 0.4 white' ;;
+	panel)  o='panel = p 0.2 0.15 0.0  0.7 0.15 0.0  0.2 0.85 0.0 white' ;;
+	esac
+	sed -e "s/^occluder = .*/$o/" "$SRC/contact.ppfd" > "$WORK/contactbad_$v.ppfd"
+	if (cd "$WORK" && "$OPPFD" "contactbad_$v.ppfd" > /dev/null 2>&1); then
+		echo "contact: overlap ($v) rejected -> NG (accepted)" >&2
+		status=1
+	else
+		echo "contact: overlap ($v) rejected -> OK"
+	fi
+done
+
 echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2

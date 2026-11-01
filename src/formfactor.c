@@ -537,6 +537,7 @@ void setup_ff(ppfd_t *p)
 			int    msub, nq, g, refined = 0;
 
 			if (i == j) continue;
+			if (p->pcov[i] || p->pcov[j]) continue; /* 接して覆われたパッチ : 光が届かない */
 			if (qi->iface == qj->iface) continue;   /* 同一面 : 互いに見えない */
 			if (coplanar(qi, qj)) continue;         /* 同一平面 (遮蔽物と壁の接触等) */
 
@@ -666,6 +667,7 @@ void setup_ff(ppfd_t *p)
 						int    msub, nq, g, v;
 
 						if (spec_on_mirror(p, &tr[it], qj)) continue;
+						if (p->pcov[is] || p->pcov[j]) continue;
 						for (v = 0; v < 4; v++) q4[v] = spec_apply(p, &tr[it], qj->p[v]);
 						nj = spec_apply_dir(&tr[it], qj->n);
 						cj = spec_apply(p, &tr[it], qj->c);

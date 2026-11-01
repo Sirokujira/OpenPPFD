@@ -866,6 +866,11 @@ void canopy_setup(ppfd_t *p)
 			/* 面が乗っている面のパッチは、重なる部分で面の放射をそのまま受ける */
 			if (ontop) fu[i] = rest_frac(q, sl, 1, tol);
 			if (onbot) fd[i] = rest_frac(q, sl, 0, tol);
+			/* 接して覆われたパッチ (床に寝かせた板の下の床など) は面を見ない */
+			if (p->pcov[i]) {
+				fu[i] = 0.0;
+				fd[i] = 0.0;
+			}
 			sup += (q->area * stop) * fu[i];
 			sdn += (q->area * stop) * fd[i];
 			if ((fu[i] <= 0.0) && (fd[i] <= 0.0)

@@ -289,11 +289,14 @@ void solve(ppfd_t *p)
 	setup_patch(p);
 	setup_target(p);
 	{
-		int f, nwall = 0, uniform = 1;
+		int f, i, nwall = 0, uniform = 1;
+		for (i = 0; i < p->npatch; i++) {
+			if (p->patch[i].iface < 6) nwall++;
+		}
 		for (f = 0; f < 6; f++) {
-			nwall += p->wdivu[f] * p->wdivv[f];
 			if ((p->wdivu[f] != p->ndivu) || (p->wdivv[f] != p->ndivv)) uniform = 0;
 		}
+		if (p->nsnap_ins > 0) uniform = 0;
 		if (uniform) {
 			plog(p, "patches = %d (chamber %d x %d x %d, occluders/panels %d), spectral bins = %d\n",
 				p->npatch, 6, p->ndivu, p->ndivv, p->npatch - nwall, p->nlam);
@@ -301,6 +304,14 @@ void solve(ppfd_t *p)
 		else {
 			plog(p, "patches = %d (chamber %d, per-face div, occluders/panels %d), spectral bins = %d\n",
 				p->npatch, nwall, p->npatch - nwall, p->nlam);
+		}
+		if ((p->nsnap_moved + p->nsnap_ins) > 0) {
+			/* 格子を変えたことは黙らない (接触する遮蔽物の外形の線へ寄せた) */
+			plog(p, "patch grid aligned to occluder contact lines : %d lines moved, %d inserted\n",
+				p->nsnap_moved, p->nsnap_ins);
+		}
+		if (p->npcov > 0) {
+			plog(p, "patches in contact with a facing surface (no light, excluded) = %d\n", p->npcov);
 		}
 	}
 

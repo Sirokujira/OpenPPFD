@@ -1205,6 +1205,82 @@ int input_data(FILE *fp, ppfd_t *p)
 		}
 	}
 
+	/*
+	面が同じ場所に重なる置き方のうち、二重計上になるものを弾く。
+	  - 体積の重なる箱 : 同じ向きの面が重なり、同じ光を 2 枚が受ける
+	  - 同じ平面で重なる厚さ 0 の板どうし : 重なった部分の 4 面がすべて互いに
+	    覆われ (setup_patch の pcov)、そこへ来た光をだれも受けない
+	  - 壁・遮蔽物の面と同一平面で重なる斜めの板 (覆う / 覆われるを扱わない)
+	向かい合う面の接触 (床に直に置いた箱、床に寝かせた板、棚板に載せた箱、
+	側壁に接する棚板) は可 : 格子を接触線にそろえ、覆われたパッチを外す。
+	*/
+	{
+		const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+		int a, b;
+		for (a = 0; a < p->nocc; a++) {
+			for (b = a + 1; b < p->nocc; b++) {
+				const occluder_t *u = &p->occ[a], *v = &p->occ[b];
+				const double wx = ((u->x1 < v->x1) ? u->x1 : v->x1) - ((u->x0 > v->x0) ? u->x0 : v->x0);
+				const double wy = ((u->y1 < v->y1) ? u->y1 : v->y1) - ((u->y0 > v->y0) ? u->y0 : v->y0);
+				const double wz = ((u->z1 < v->z1) ? u->z1 : v->z1) - ((u->z0 > v->z0) ? u->z0 : v->z0);
+				const int tu = ((u->x1 - u->x0) <= 1e-12) ? 0 : (((u->y1 - u->y0) <= 1e-12) ? 1 : (((u->z1 - u->z0) <= 1e-12) ? 2 : -1));
+				const int tv = ((v->x1 - v->x0) <= 1e-12) ? 0 : (((v->y1 - v->y0) <= 1e-12) ? 1 : (((v->z1 - v->z0) <= 1e-12) ? 2 : -1));
+				int bad = 0;
+				if ((wx > tol) && (wy > tol) && (wz > tol)) bad = 1;          /* 体積の重なり */
+				if ((tu >= 0) && (tu == tv)) {
+					/* 同じ向きの板 : 同じ平面で面積が重なる */
+					const double w1 = (tu == 0) ? wy : wx, w2 = (tu == 2) ? wy : wz;
+					if ((fabs((tu == 0) ? (u->x0 - v->x0) : ((tu == 1) ? (u->y0 - v->y0) : (u->z0 - v->z0))) <= tol)
+					 && (w1 > tol) && (w2 > tol)) bad = 1;
+				}
+				if (bad) {
+					fprintf(stderr, "*** occluders \"%s\" and \"%s\" overlap (the shared surface would be "
+						"counted twice)\n", u->name, v->name);
+					fprintf(stderr, "    (touching is fine : put one on top of the other, or merge them)\n");
+					return 1;
+				}
+			}
+		}
+		for (a = 0; a < p->npanel; a++) {
+			const panel_t *pn = &p->panel[a];
+			const int an = (fabs(pn->n.x) > 1.0 - 1e-9) ? 0 : ((fabs(pn->n.y) > 1.0 - 1e-9) ? 1 : ((fabs(pn->n.z) > 1.0 - 1e-9) ? 2 : -1));
+			const double L[3] = {p->Lx, p->Ly, p->Lz};
+			const double w = (an == 0) ? pn->org.x : ((an == 1) ? pn->org.y : pn->org.z);
+			int bad = 0;
+			if (an < 0) continue;
+			if ((fabs(w) <= tol) || (fabs(w - L[an]) <= tol)) bad = 1;
+			for (b = 0; (b < p->nocc) && !bad; b++) {
+				const occluder_t *o = &p->occ[b];
+				const double lo[3] = {o->x0, o->y0, o->z0}, hi[3] = {o->x1, o->y1, o->z1};
+				vec3_t c[4];
+				double mn[3], mx[3];
+				int k, v2, ov = 1;
+				if ((fabs(w - lo[an]) > tol) && (fabs(w - hi[an]) > tol)) continue;
+				c[0] = pn->org;
+				c[1] = v_add(pn->org, pn->eu);
+				c[2] = v_add(c[1], pn->ev);
+				c[3] = v_add(pn->org, pn->ev);
+				for (k = 0; k < 3; k++) {
+					mn[k] = 1e300;
+					mx[k] = -1e300;
+					for (v2 = 0; v2 < 4; v2++) {
+						const double x = (k == 0) ? c[v2].x : ((k == 1) ? c[v2].y : c[v2].z);
+						if (x < mn[k]) mn[k] = x;
+						if (x > mx[k]) mx[k] = x;
+					}
+					if ((k != an) && ((((mx[k] < hi[k]) ? mx[k] : hi[k]) - ((mn[k] > lo[k]) ? mn[k] : lo[k])) <= tol)) ov = 0;
+				}
+				if (ov) bad = 1;
+			}
+			if (bad) {
+				fprintf(stderr, "*** panel \"%s\" lies on a wall / occluder face (the surface would be "
+					"counted twice)\n", pn->name);
+				fprintf(stderr, "    (raise it off the surface, or use an occluder plate instead)\n");
+				return 1;
+			}
+		}
+	}
+
 	/* ---- 群落スラブ : z の降順に並べ、重なりを弾き、減衰重みを決める ---- */
 	if (p->nslab > 0) {
 		int j, k;

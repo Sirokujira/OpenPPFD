@@ -262,6 +262,9 @@ typedef struct {
 
 	/* 導出量 */
 	int       npatch;
+	int       nsnap_moved, nsnap_ins; /* 接触線にそろえた格子線 (動かした / 挿入した本数) */
+	unsigned char *pcov;            /* [npatch] 1 : 向かい合う面と接して覆われたパッチ (光が届かない) */
+	int       npcov;
 	patch_t  *patch;
 	double   *ff;                   /* [npatch*npatch] 形態係数 F_ij */
 	float    *plen;                 /* [npatch*npatch*PLEN_N] 群落内の経路長の 2 点則 (s1, s2, w1) [m] */

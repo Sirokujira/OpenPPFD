@@ -112,6 +112,39 @@ typedef struct {
 	int    imat;
 } hit_t;
 
+/*
+面 (軸 an の平面 w、光子の来る側を向く向き sg) の点 x が、同一平面で向かい合う
+面 (壁・ほかの遮蔽物の面) に覆われているか。決定論の解法の pcov と同じ判定で、
+覆われた面には光子が届かない : 床に寝かせた板なら床ではなく板に、棚板に載せた
+箱の底面ではなく棚板の下面に当たる (同じ t に 2 面あるときの取り違えを防ぐ)。
+owner は面の持ち主の遮蔽物 (壁なら -1)。
+*/
+static int mc_covered(const ppfd_t *p, vec3_t x, int an, double w, double sg, int owner)
+{
+	const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+	const double L[3] = { p->Lx, p->Ly, p->Lz };
+	const double xc[3] = { x.x, x.y, x.z };
+	const int a1 = (an + 1) % 3, a2 = (an + 2) % 3;
+	int io;
+
+	if (owner >= 0) {
+		/* 壁の内向き法線が -sg : min の壁は +、max の壁は - */
+		if ((sg < 0.0) && (fabs(w) <= tol)) return 1;
+		if ((sg > 0.0) && (fabs(w - L[an]) <= tol)) return 1;
+	}
+	for (io = 0; io < p->nocc; io++) {
+		const occluder_t *b = &p->occ[io];
+		const double lo[3] = { b->x0, b->y0, b->z0 };
+		const double hi[3] = { b->x1, b->y1, b->z1 };
+		const double wf = (sg > 0.0) ? lo[an] : hi[an];    /* 外向き法線が -sg の面 */
+		if (io == owner) continue;
+		if (fabs(wf - w) > tol) continue;
+		if ((xc[a1] > lo[a1] + tol) && (xc[a1] < hi[a1] - tol)
+		 && (xc[a2] > lo[a2] + tol) && (xc[a2] < hi[a2] - tol)) return 1;
+	}
+	return 0;
+}
+
 static void hit_walls(const ppfd_t *p, vec3_t o, vec3_t d, hit_t *h)
 {
 	const double L[3] = { p->Lx, p->Ly, p->Lz };
@@ -126,6 +159,8 @@ static void hit_walls(const ppfd_t *p, vec3_t o, vec3_t d, hit_t *h)
 		else if (dc[i] < 0.0) { t = -oc[i] / dc[i];         f = 2 * i; }
 		else continue;
 		if (t < 0.0) t = 0.0;
+		if ((t < h->t) && (p->nocc > 0)
+		 && mc_covered(p, v_add(o, v_scale(d, t)), i, (f & 1) ? L[i] : 0.0, (f & 1) ? -1.0 : 1.0, -1)) continue;
 		if (t < h->t) {
 			h->t = t;
 			h->imat = p->wallmat[f];
@@ -162,6 +197,9 @@ static void hit_occluders(const ppfd_t *p, vec3_t o, vec3_t d, double teps, hit_
 			}
 		}
 		if (!ok || (an < 0) || (tn <= teps) || (tn >= h->t)) continue;
+		/* 入る面が向かい合う面に覆われていれば、この箱には届かない */
+		if (mc_covered(p, v_add(o, v_scale(d, tn)), an, (dc[an] > 0.0) ? lo[an] : hi[an],
+		               (dc[an] > 0.0) ? -1.0 : 1.0, io)) continue;
 		h->t = tn;
 		h->imat = b->imat;
 		h->n = v_make((an == 0) ? ((dc[0] > 0.0) ? -1.0 : 1.0) : 0.0,
