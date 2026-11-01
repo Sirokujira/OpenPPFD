@@ -793,7 +793,8 @@ chkabs "tiers: no leak above shelf" "$(sumrow b_top 5)" 0
 # 棚板を外すと 2 段は向かい合う面どうしでやりとりする (検証 (y))。収支が閉じること
 sed '/^occluder = shelf/d' "$SRC/rack3.ppfd" > "$WORK/rack3open.ppfd"
 run rack3open.ppfd
-chkabs "tiers: no shelf closure" "$(logval 'closure error')" 2e-4
+# (以前は棚板の下の Lambert 光源の水平面が側壁のパッチをまたいで 5.3e-5。配光の縁で細分する)
+chkabs "tiers: no shelf closure" "$(logval 'closure error')" 1e-6
 # specbounce の上限は変換の数で決まる : 鏡面 4 面 (2 軸) なら 14 段まで入り、
 # 打ち切りの収支誤差が 6 段の -1.4% から下がる。上限を超えた要求はログに出して下げる
 sed -e '/^canopy/d' -e 's/^specbounce .*/specbounce  = 20/' "$SRC/difftrans.ppfd" > "$WORK/specdeep.ppfd"
@@ -1064,7 +1065,7 @@ echo "== (ad) canopies resting on a surface (floor / shelf) with leafscatter =="
 # 漏れ (rack3 の上段を棚板に乗せると下段の群落の上 +2.4%)、床に乗ったベッドは弾いていた
 run rest.ppfd
 rsc=$(logval 'absorbed by canopy')
-chkabs "rest: closure" "$(logval 'closure error')" 1e-4
+chkabs "rest: closure" "$(logval 'closure error')" 1e-6
 for t in a_top a_in b_top b_in; do cp "$WORK/ppfd_map_$t.csv" "$WORK/map_rs$t.csv"; done
 # 面に乗った面の分配は「重なりの割合」の総和 = 面積 (ベッドの縁は床のパッチの格子にそろえていない)
 chk "rest: bed on floor plane sum" "$(awk '/^  slab 1 / {print $NF; exit}' "$WORK/ppfd.log")" 1 1e-4
@@ -1153,7 +1154,8 @@ for v in occ pan; do
 done
 chkabs "contact: panel divider == occluder" "$(maxdiff map_cdivocc.csv map_cdivpan.csv)" 0
 # 格子の軸に平行でない接触線 (斜めの仕切りと床・天井の交線) はそろえられないのでログで警告する
-sed -e 's/^occluder = .*/panel = d 0.2 0 0  0.8 1 0  0.2 0 1 white/' "$SRC/contact.ppfd" > "$WORK/contact_diag.ppfd"
+sed -e 's/^occluder = .*/panel = d 0.2 0 0  0.8 1 0  0.2 0 1 white/' -e 's/^led = .*/led = 0.2 0.5 0.5 1.0 g iso/' \
+	"$SRC/contact.ppfd" > "$WORK/contact_diag.ppfd"
 run contact_diag.ppfd
 if grep -q 'warning : 2 panel contact lines are not parallel' "$WORK/ppfd.log"; then
 	echo "contact: diagonal contact warned -> OK"
@@ -1204,6 +1206,52 @@ for v in plates boxes panel; do
 		status=1
 	else
 		echo "contact: overlap ($v) rejected -> OK"
+	fi
+done
+
+echo "== (af) lamps close to surfaces (near-field quadrature, lamps on a surface rejected) =="
+# lamp.ppfd : 黒いチャンバ、天井から 1 cm の等方光源 : 壁の吸収 = 放射束 (以前 +2.6%)
+run lamp.ppfd
+chkabs "lamp: iso 1 cm below ceiling" "$(logval 'closure error')" 1e-5
+if grep -q 'near-field : .* patches refined' "$WORK/ppfd.log"; then
+	echo "lamp: near-field refinement logged -> OK"
+else
+	echo "lamp: near-field refinement logged -> NG" >&2
+	status=1
+fi
+# 2 mm でも閉じる (細分は光源のまわりだけ)
+sed 's/^led = .*/led = 0.5 0.5 0.998 1.0 g iso/' "$SRC/lamp.ppfd" > "$WORK/lamp2mm.ppfd"
+run lamp2mm.ppfd
+chkabs "lamp: iso 2 mm below ceiling" "$(logval 'closure error')" 1e-5
+# 天井近くの Lambert 光源 : 配光の縁 (水平面) が側壁をまたぐ (以前 1.5e-4)
+sed 's/^led = .*/led = 0.5 0.5 0.98 1.0 g beam 1/' "$SRC/lamp.ppfd" > "$WORK/lampbeam.ppfd"
+run lampbeam.ppfd
+chkabs "lamp: beam 1 near ceiling" "$(logval 'closure error')" 1e-6
+# 天井にちょうど置いた下向きの光源は受け付ける (天井へは出さない)
+sed 's/^led = .*/led = 0.5 0.5 1.0 1.0 g beam 1/' "$SRC/lamp.ppfd" > "$WORK/lampceil.ppfd"
+run lampceil.ppfd
+chkabs "lamp: beam 1 on the ceiling" "$(logval 'closure error')" 1e-6
+# 厚さ 0 の棚板の下に付けた下向きの光源 : 棚板の上は厳密に 0
+sed -e 's/^led = .*/led = 0.5 0.5 0.5 1.0 g beam 1\noccluder = shelf 0 1 0 1 0.5 0.5 black/' \
+    -e 's/^target = floor 0.0 8 8/target = floor 0.0 8 8\ntarget = above 0.7 8 8/' "$SRC/lamp.ppfd" > "$WORK/lampshelf.ppfd"
+run lampshelf.ppfd
+chkabs "lamp: under a shelf, none above" "$(sumrow above 5)" 0
+chkabs "lamp: under a shelf closure" "$(logval 'closure error')" 1e-6
+# 弾く置き方 : 天井の等方光源 / 天井へ傾けた光源 / 棚板の上の等方光源 / 箱の中 / チャンバの外
+for v in iso tilt shelf box out; do
+	case $v in
+	iso)   l='led = 0.5 0.5 1.0 1.0 g iso' ;;
+	tilt)  l='led = 0.5 0.5 1.0 1.0 g beam 1 dir 1 0 -1' ;;
+	shelf) l='led = 0.5 0.5 0.5 1.0 g iso\noccluder = shelf 0 1 0 1 0.5 0.5 black' ;;
+	box)   l='led = 0.5 0.5 0.45 1.0 g iso\noccluder = box 0.4 0.6 0.4 0.6 0.4 0.5 black' ;;
+	out)   l='led = 0.5 0.5 1.2 1.0 g beam 1' ;;
+	esac
+	sed "s/^led = .*/$l/" "$SRC/lamp.ppfd" > "$WORK/lampbad_$v.ppfd"
+	if (cd "$WORK" && "$OPPFD" "lampbad_$v.ppfd" > /dev/null 2>&1); then
+		echo "lamp: on a surface ($v) rejected -> NG (accepted)" >&2
+		status=1
+	else
+		echo "lamp: on a surface ($v) rejected -> OK"
 	fi
 done
 

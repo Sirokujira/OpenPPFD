@@ -287,26 +287,33 @@ void direct_point_ex(const ppfd_t *p, vec3_t x, vec3_t n, double *E, double *dep
 
 				cr = -v_dot(n, r) / d;          /* 受光面が光源を向く向き */
 				if (cr <= 0.0) continue;
-				if (occ_blocked_img(p, sp, x, e->img)) {      /* 棚板等の影 (鏡像は折り返して判定) */
-					if (vflag != NULL) vflag[ie] |= 2;
-					continue;
-				}
-				if (vflag != NULL) vflag[ie] |= 1;
-
+				/*
+				配光の縁 (cos^m の半球の境、実測配光の 0 の範囲) も影の縁と同じく
+				被積分関数を不連続にするので、届かない点として vflag に記録する
+				(縁がパッチをまたげば細分 : 天井近くの Lambert 光源の水平面が
+				側壁のパッチをまたぐと、黒い箱でも収支 1e-4 台になっていた)。
+				*/
 				if (e->idist >= 0) {
 					/* 実測配光 : Î は ∫Î dΩ = 1 に正規化済みなので I = Φ Î */
 					const vec3_t u = v_scale(r, 1.0 / d);
 					inten = fsub * photdist_dir(p, e, u);
-					if (inten <= 0.0) continue;
 				}
 				else if (e->mexp < 0.0) {
 					inten = fsub / (4.0 * PI);
 				}
 				else {
 					cs = v_dot(e->dir, r) / d;
-					if (cs <= 0.0) continue;
-					inten = fsub * (e->mexp + 1.0) / (2.0 * PI) * pow(cs, e->mexp);
+					inten = (cs <= 0.0) ? 0.0 : (fsub * (e->mexp + 1.0) / (2.0 * PI) * pow(cs, e->mexp));
 				}
+				if (inten <= 0.0) {
+					if (vflag != NULL) vflag[ie] |= 2;
+					continue;
+				}
+				if (occ_blocked_img(p, sp, x, e->img)) {      /* 棚板等の影 (鏡像は折り返して判定) */
+					if (vflag != NULL) vflag[ie] |= 2;
+					continue;
+				}
+				if (vflag != NULL) vflag[ie] |= 1;
 
 				es = inten * cr / d2;
 
@@ -371,8 +378,113 @@ Gauss-Legendre で求積して E[] に、群落への預け入れを dp[] に加
 vflag が非 NULL なら、光源ごとに「どこかの求積点に届いた (1)」「どこかの
 求積点で遮られた (2)」を立てる (影の境界の判定に使う)。
 */
+/*
+光源 (面光源は分割した点、鏡像も) からパッチの小矩形 [u0,u0+h] x [v0,v0+h]
+までの最短距離の下限。小矩形を平行四辺形のまま媒介変数を切り詰めて近い点を
+取る (壁・遮蔽物のパッチは長方形なので厳密。斜めの板では目安)。パッチの
+平面上・裏側の光源は照らさないので数えない (1e300 を返しうる)。
+*/
+static double cell_dist(const ppfd_t *p, const patch_t *q, double u0, double v0, double h)
+{
+	const vec3_t eu = v_sub(q->p[1], q->p[0]);
+	const vec3_t ev = v_sub(q->p[3], q->p[0]);
+	const double uu = v_dot(eu, eu), vv = v_dot(ev, ev);
+	double dmin = 1e300;
+	int    ie, iu, iv;
+
+	for (ie = 0; ie < p->nemit; ie++) {
+		const emitter_t *e = &p->emit[ie];
+		for (iv = 0; iv < e->nv; iv++) {
+			for (iu = 0; iu < e->nu; iu++) {
+				vec3_t sp = e->pos, r;
+				double a, b, d;
+				if (e->nu * e->nv > 1) {
+					const double du = ((iu + 0.5) / e->nu - 0.5) * e->wsize;
+					const double dv = ((iv + 0.5) / e->nv - 0.5) * e->hsize;
+					sp = v_add(sp, v_add(v_scale(e->ax, du), v_scale(e->ay, dv)));
+				}
+				r = v_sub(sp, q->p[0]);
+				/* パッチの平面上か裏側の光源はこのパッチを照らさない (受光側の cos <= 0) */
+				if (v_dot(q->n, r) <= 1e-12 * (p->Lx + p->Ly + p->Lz)) continue;
+				a = v_dot(r, eu) / uu;
+				b = v_dot(r, ev) / vv;
+				if (a < u0) a = u0;
+				if (a > u0 + h) a = u0 + h;
+				if (b < v0) b = v0;
+				if (b > v0 + h) b = v0 + h;
+				d = v_norm(v_sub(r, v_add(v_scale(eu, a), v_scale(ev, b))));
+				if (d < dmin) dmin = d;
+			}
+		}
+	}
+	return dmin;
+}
+
+#define NEAR_MAXDEPTH 14
+
+/*
+小矩形 1 個の 3 x 3 Gauss 求積。光源が小矩形の大きさの 2 倍より近ければ
+4 つに割って再帰する (点光源の近くでは放射照度が 1/d² の尖った山になり、
+固定の求積点では山を拾えない : 天井から 1 cm の等方光源で収支 +2.6%)。
+割らない小矩形は従来の固定格子と同じ演算になる。
+*/
+static void quad_cell(const ppfd_t *p, const patch_t *q, double u0, double v0, double h, int depth,
+                      double *E, double *dp, double *tmp, double *dtmp, double *seg,
+                      unsigned char *vflag, int *maxdepth)
+{
+	static const double gx[3] = {
+		0.5 * (1.0 - 0.7745966692414834), 0.5, 0.5 * (1.0 + 0.7745966692414834)
+	};
+	static const double gw[3] = {
+		0.5 * 0.5555555555555556, 0.5 * 0.8888888888888888, 0.5 * 0.5555555555555556
+	};
+	const int ns = p->nspec;
+	const int nl = p->canopy.scatter ? p->cnl : p->canopy.nlayer;
+	const vec3_t eu = v_sub(q->p[1], q->p[0]);
+	const vec3_t ev = v_sub(q->p[3], q->p[0]);
+	int gu, gv, i;
+
+	if ((maxdepth != NULL) && (depth < NEAR_MAXDEPTH)) {
+		const double size = h * ((v_norm(eu) > v_norm(ev)) ? v_norm(eu) : v_norm(ev));
+		if (cell_dist(p, q, u0, v0, h) < 2.0 * size) {
+			const double h2 = 0.5 * h;
+			if (depth + 1 > *maxdepth) *maxdepth = depth + 1;
+			quad_cell(p, q, u0,      v0,      h2, depth + 1, E, dp, tmp, dtmp, seg, vflag, maxdepth);
+			quad_cell(p, q, u0 + h2, v0,      h2, depth + 1, E, dp, tmp, dtmp, seg, vflag, maxdepth);
+			quad_cell(p, q, u0,      v0 + h2, h2, depth + 1, E, dp, tmp, dtmp, seg, vflag, maxdepth);
+			quad_cell(p, q, u0 + h2, v0 + h2, h2, depth + 1, E, dp, tmp, dtmp, seg, vflag, maxdepth);
+			return;
+		}
+	}
+	for (gv = 0; gv < 3; gv++) {
+		for (gu = 0; gu < 3; gu++) {
+			const double u = u0 + (gx[gu] * h);
+			const double v = v0 + (gx[gv] * h);
+			const double w = gw[gu] * gw[gv] * h * h;
+			const vec3_t x = v_add(q->p[0], v_add(v_scale(eu, u), v_scale(ev, v)));
+
+			for (i = 0; i < p->nlam; i++) tmp[i] = 0.0;
+			if (dtmp != NULL) {
+				for (i = 0; i < ns * nl; i++) dtmp[i] = 0.0;
+			}
+			direct_point_ex(p, x, q->n, tmp, dtmp, seg, vflag);
+			for (i = 0; i < p->nlam; i++) E[i] += w * tmp[i];
+			if (dtmp != NULL) {
+				for (i = 0; i < ns * nl; i++) dp[i] += w * dtmp[i];
+			}
+		}
+	}
+}
+
+/*
+パッチの直接光の複合求積 (msub x msub の小矩形それぞれに 3 x 3 Gauss)。
+near = 1 なら光源に近い小矩形を再帰的に割る (quad_cell)。near = 0 の演算は
+以前の固定格子とまったく同じ (小矩形の原点 su*h は (su + gx)*h と同じ値を作る
+ように u0 + gx*h ではなく (su + gx)*h で計算する)。
+*/
 static void patch_quadrature(const ppfd_t *p, const patch_t *q, int msub, double *E, double *dp,
-                             double *tmp, double *dtmp, double *seg, unsigned char *vflag)
+                             double *tmp, double *dtmp, double *seg, unsigned char *vflag,
+                             int near, int *maxdepth)
 {
 	static const double gx[3] = {
 		0.5 * (1.0 - 0.7745966692414834), 0.5, 0.5 * (1.0 + 0.7745966692414834)
@@ -389,6 +501,10 @@ static void patch_quadrature(const ppfd_t *p, const patch_t *q, int msub, double
 
 	for (sv = 0; sv < msub; sv++) {
 		for (su = 0; su < msub; su++) {
+			if (near) {
+				quad_cell(p, q, su * h, sv * h, h, 0, E, dp, tmp, dtmp, seg, vflag, maxdepth);
+				continue;
+			}
 			for (gv = 0; gv < 3; gv++) {
 				for (gu = 0; gu < 3; gu++) {
 					const double u = (su + gx[gu]) * h;
@@ -419,7 +535,7 @@ void direct_patch(ppfd_t *p)
 	double *cd = NULL;
 	int ip;
 	int msub = p->msub;
-	int nedge = 0;
+	int nedge = 0, nnear = 0, depthmax = 0;
 
 	if (msub <= 0) {
 		msub = (p->nemit <= 8) ? 3 : ((p->nemit <= 64) ? 2 : 1);
@@ -433,7 +549,7 @@ void direct_patch(ppfd_t *p)
 	}
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic) reduction(+:nedge)
+#pragma omp parallel for schedule(dynamic) reduction(+:nedge,nnear)
 #endif
 	for (ip = 0; ip < n; ip++) {
 		const patch_t *q = &p->patch[ip];
@@ -442,8 +558,8 @@ void direct_patch(ppfd_t *p)
 		double *dp = (cd != NULL) ? &cd[(size_t)ip * ns * nl] : NULL;
 		double *dtmp = (cd != NULL) ? (double *)xcalloc((size_t)ns * nl, sizeof(double)) : NULL;
 		double *seg = (cd != NULL) ? (double *)xmalloc((size_t)nl * sizeof(double)) : NULL;
-		unsigned char *vflag = occ_any(p) ? (unsigned char *)xcalloc((size_t)p->nemit, 1) : NULL;
-		int edge = 0, ie, i;
+		unsigned char *vflag = (unsigned char *)xcalloc((size_t)p->nemit, 1);
+		int edge = 0, ie, i, near = 0, mdep = 0;
 
 		if (p->pcov[ip]) {
 			/* 接して覆われたパッチには光が届かない (E = 0、預け入れも 0) */
@@ -460,7 +576,16 @@ void direct_patch(ppfd_t *p)
 		面積平均の求積重みをそのまま使い、最後に A_i を掛ければよい。
 		Σ_m 預け入れ + 透過 = 1 が望遠鏡和で厳密に成り立つ。
 		*/
-		patch_quadrature(p, q, msub, E, dp, tmp, dtmp, seg, vflag);
+		/*
+		光源がパッチの近く (粗い求積の小矩形 2 個ぶんより近い) なら、近い小矩形を
+		再帰的に割る。遠いパッチは従来の固定格子のまま (ビット一致)。
+		*/
+		{
+			const double ql = (v_norm(v_sub(q->p[1], q->p[0])) > v_norm(v_sub(q->p[3], q->p[0])))
+			                ? v_norm(v_sub(q->p[1], q->p[0])) : v_norm(v_sub(q->p[3], q->p[0]));
+			near = (cell_dist(p, q, 0.0, 0.0, 1.0) < 2.0 * ql / msub);
+		}
+		patch_quadrature(p, q, msub, E, dp, tmp, dtmp, seg, vflag, near, &mdep);
 
 		/*
 		影の境界がパッチをまたぐか : 粗い求積の点で、届いた点と遮られた点が
@@ -482,9 +607,16 @@ void direct_patch(ppfd_t *p)
 			if (dp != NULL) {
 				for (i = 0; i < ns * nl; i++) dp[i] = 0.0;
 			}
-			patch_quadrature(p, q, msub_f, E, dp, tmp, dtmp, seg, NULL);
+			patch_quadrature(p, q, msub_f, E, dp, tmp, dtmp, seg, NULL, near, &mdep);
 		}
 		nedge += edge;
+		nnear += near;
+#ifdef _OPENMP
+#pragma omp critical (near_depth)
+#endif
+		{
+			if (mdep > depthmax) depthmax = mdep;
+		}
 
 		if (dp != NULL) {
 			/*
@@ -520,7 +652,12 @@ void direct_patch(ppfd_t *p)
 	}
 
 	if (nedge > 0) {
-		plog(p, "  shadow edges : %d patches refined to msub = %d\n",
+		plog(p, "  shadow / beam edges : %d patches refined to msub = %d\n",
 			nedge, (msub * 8 < 32) ? (msub * 8) : 32);
+	}
+	if (nnear > 0) {
+		/* 近くの光源の山を拾うため割った (割り足りないとログで分かるように深さも出す) */
+		plog(p, "  near-field : %d patches refined adaptively around close lamps (depth %d%s)\n",
+			nnear, depthmax, (depthmax >= NEAR_MAXDEPTH) ? ", LIMIT REACHED : lamp too close to a surface" : "");
 	}
 }

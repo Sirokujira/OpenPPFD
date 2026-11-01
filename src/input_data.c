@@ -531,6 +531,162 @@ static double face_cover(const ppfd_t *p, const cslab_t *c, int side)
 	return a;
 }
 
+/*
+光源 e の放射束のうち、半空間 d . ns < 0 (面 ns の裏側) へ向かう割合。
+配光 (等方 / cos^m / 実測配光) を中点則で積分する (180 x 360)。半空間へ
+まったく出さない配光 (面に向けて 0) は厳密に 0 になる : cos^m は cs <= 0、
+実測配光は表の範囲外が 0。
+*/
+static double emit_frac_back(const ppfd_t *p, const emitter_t *e, vec3_t ns)
+{
+	const int nt = 180, np = 360;
+	const vec3_t w = v_scale(ns, -1.0);
+	const vec3_t a0 = (fabs(w.x) < 0.9) ? v_make(1, 0, 0) : v_make(0, 1, 0);
+	const vec3_t t1 = v_unit(v_cross(w, a0));
+	const vec3_t t2 = v_cross(w, t1);
+	double f = 0.0;
+	int    it, ip;
+
+	for (it = 0; it < nt; it++) {
+		const double th = (it + 0.5) * (0.5 * PI / nt);
+		const double st = sin(th), ct = cos(th);
+		const double dom = st * (0.5 * PI / nt) * (2.0 * PI / np);
+		for (ip = 0; ip < np; ip++) {
+			const double ph = (ip + 0.5) * (2.0 * PI / np);
+			const vec3_t d = v_add(v_scale(w, ct), v_add(v_scale(t1, st * cos(ph)), v_scale(t2, st * sin(ph))));
+			double I;
+			if (e->idist >= 0) {
+				I = photdist_dir(p, e, d);
+			}
+			else if (e->mexp < 0.0) {
+				I = 1.0 / (4.0 * PI);
+			}
+			else {
+				const double cs = v_dot(e->dir, d);
+				I = (cs <= 0.0) ? 0.0 : ((e->mexp + 1.0) / (2.0 * PI) * pow(cs, e->mexp));
+			}
+			f += I * dom;
+		}
+	}
+	return f;
+}
+
+/*
+光源 (面光源は分割した点) が面の上・遮蔽物の中にないか。面にちょうど乗った光源が
+面の側へ出す光は、距離 0 で面に当たる : 求積では拾えず (天井に置いた等方光源で
+収支 -50%)、厚さ 0 の棚板なら光線の端が板の面に乗るので素通りして上の段を
+照らす。面の上に置くなら面へ向けて光を出さない配光 (下向きの beam / dir) にする。
+厚さ 0 の板・斜めの板は片面にだけ出していればよい (板の反対側に付いた器具)。
+*/
+static int check_emitter_surfaces(const ppfd_t *p)
+{
+	const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+	const double L[3] = {p->Lx, p->Ly, p->Lz};
+	static const char *wname[6] = {"xmin", "xmax", "ymin", "ymax", "floor", "ceiling"};
+	int ie, iu, iv, a, io;
+
+	for (ie = 0; ie < p->nemit; ie++) {
+		const emitter_t *e = &p->emit[ie];
+		for (iv = 0; iv < e->nv; iv++) {
+			for (iu = 0; iu < e->nu; iu++) {
+				vec3_t sp = e->pos;
+				double c[3];
+				if (e->nu * e->nv > 1) {
+					const double du = ((iu + 0.5) / e->nu - 0.5) * e->wsize;
+					const double dv = ((iv + 0.5) / e->nv - 0.5) * e->hsize;
+					sp = v_add(sp, v_add(v_scale(e->ax, du), v_scale(e->ay, dv)));
+				}
+				c[0] = sp.x; c[1] = sp.y; c[2] = sp.z;
+				for (a = 0; a < 3; a++) {
+					if ((c[a] < -tol) || (c[a] > L[a] + tol)) {
+						fprintf(stderr, "*** light source %d at (%g, %g, %g) is outside the chamber\n",
+							ie + 1, sp.x, sp.y, sp.z);
+						return 1;
+					}
+				}
+				for (a = 0; a < 6; a++) {
+					const int ax = a / 2;
+					vec3_t ns = v_make(0, 0, 0);
+					double fr;
+					if (fabs(c[ax] - ((a % 2) ? L[ax] : 0.0)) > tol) continue;
+					if (ax == 0) ns.x = (a % 2) ? -1.0 : 1.0;
+					if (ax == 1) ns.y = (a % 2) ? -1.0 : 1.0;
+					if (ax == 2) ns.z = (a % 2) ? -1.0 : 1.0;
+					fr = emit_frac_back(p, e, ns);
+					if (fr > 1e-6) {
+						fprintf(stderr, "*** light source %d at (%g, %g, %g) lies on the %s and sends %.1f %% "
+							"of its flux into it\n", ie + 1, sp.x, sp.y, sp.z, wname[a], 100.0 * fr);
+						fprintf(stderr, "    (move it into the room, or aim its distribution away : beam / dir)\n");
+						return 1;
+					}
+				}
+				for (io = 0; io < p->nocc; io++) {
+					const occluder_t *o = &p->occ[io];
+					const double lo[3] = {o->x0, o->y0, o->z0}, hi[3] = {o->x1, o->y1, o->z1};
+					int inside = 1, onface = -1, k, thin = -1;
+					for (k = 0; k < 3; k++) {
+						if (hi[k] - lo[k] <= 1e-12) thin = k;
+						if ((c[k] < lo[k] - tol) || (c[k] > hi[k] + tol)) inside = 0;
+					}
+					if (!inside) continue;
+					for (k = 0; k < 3; k++) {
+						if ((fabs(c[k] - lo[k]) <= tol) || (fabs(c[k] - hi[k]) <= tol)) onface = k;
+					}
+					if (onface < 0) {
+						fprintf(stderr, "*** light source %d at (%g, %g, %g) is inside occluder \"%s\"\n",
+							ie + 1, sp.x, sp.y, sp.z, o->name);
+						return 1;
+					}
+					for (k = 0; k < 3; k++) {
+						/* 面に乗る軸ごとに、外向きの法線の裏 (箱の中) へ出す光 */
+						int s;
+						if ((thin >= 0) && (k != thin)) continue;     /* 厚さ 0 の板の縁の面は無い */
+						for (s = 0; s < 2; s++) {
+							vec3_t ns = v_make(0, 0, 0);
+							double fr, fr2 = 1.0;
+							if (fabs(c[k] - ((s == 0) ? lo[k] : hi[k])) > tol) continue;
+							if (k == 0) ns.x = (s == 0) ? -1.0 : 1.0;
+							if (k == 1) ns.y = (s == 0) ? -1.0 : 1.0;
+							if (k == 2) ns.z = (s == 0) ? -1.0 : 1.0;
+							fr = emit_frac_back(p, e, ns);
+							/* 厚さ 0 の板は表裏のどちらか片側へだけ出していればよい */
+							if (k == thin) fr2 = emit_frac_back(p, e, v_scale(ns, -1.0));
+							if ((fr > 1e-6) && (fr2 > 1e-6)) {
+								fprintf(stderr, "*** light source %d at (%g, %g, %g) lies on occluder \"%s\" and "
+									"sends %.1f %% of its flux into it\n", ie + 1, sp.x, sp.y, sp.z, o->name,
+									100.0 * ((k == thin) ? ((fr < fr2) ? fr : fr2) : fr));
+								fprintf(stderr, "    (move it off the surface, or aim its distribution away : beam / dir)\n");
+								return 1;
+							}
+							if (k == thin) break;   /* 板の両面は同じ平面 */
+						}
+					}
+				}
+				for (io = 0; io < p->npanel; io++) {
+					const panel_t *pn = &p->panel[io];
+					const vec3_t N = v_cross(pn->eu, pn->ev);
+					const double nn = v_dot(N, N);
+					const vec3_t r = v_sub(sp, pn->org);
+					double u, v, fr, fr2;
+					if (fabs(v_dot(r, pn->n)) > tol) continue;
+					u = v_dot(v_cross(r, pn->ev), N) / nn;
+					v = v_dot(v_cross(pn->eu, r), N) / nn;
+					if ((u < -1e-9) || (u > 1.0 + 1e-9) || (v < -1e-9) || (v > 1.0 + 1e-9)) continue;
+					fr = emit_frac_back(p, e, pn->n);
+					fr2 = emit_frac_back(p, e, v_scale(pn->n, -1.0));
+					if ((fr > 1e-6) && (fr2 > 1e-6)) {
+						fprintf(stderr, "*** light source %d at (%g, %g, %g) lies on panel \"%s\" and sends "
+							"light through both sides\n", ie + 1, sp.x, sp.y, sp.z, pn->name);
+						fprintf(stderr, "    (move it off the panel, or aim its distribution to one side : beam / dir)\n");
+						return 1;
+					}
+				}
+			}
+		}
+	}
+	return 0;
+}
+
 int input_data(FILE *fp, ppfd_t *p)
 {
 	int    nline = 0, ierr = 0;
@@ -1280,6 +1436,8 @@ int input_data(FILE *fp, ppfd_t *p)
 			}
 		}
 	}
+
+	if (check_emitter_surfaces(p)) return 1;
 
 	/* ---- 群落スラブ : z の降順に並べ、重なりを弾き、減衰重みを決める ---- */
 	if (p->nslab > 0) {
