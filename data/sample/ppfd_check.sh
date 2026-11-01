@@ -936,13 +936,11 @@ chkabs "bedscat: mirror equiv. (above)" "$(maxdiff map_m11above.csv ppfd_map_abo
 chkabs "bedscat: mirror equiv. (in)"    "$(maxdiff map_m11mid.csv ppfd_map_mid.csv)" 1e-6
 chkabs "bedscat: mirror equiv. (below)" "$(maxdiff map_m11below.csv ppfd_map_below.csv)" 1e-6
 chk "bedscat: mirror canopy abs" "$m11c" "$(awk -v a="$(logval 'absorbed by canopy')" 'BEGIN {printf "%.9g", a / 2}')" 1e-5
-# 弾く組み合わせ : 床・天井の鏡面 / 床に接するベッド / 高さの違うベッドの並び /
-# 棚板なしで別の段にあるベッド
-for v in zmir floor height noshelf; do
+# 弾く組み合わせ : 床・天井の鏡面 / 高さの違うベッドの並び /
+# 棚板なしで別の段にあるベッド (床に乗ったベッドは検証 (ad) で受け付ける)
+for v in zmir height noshelf; do
 	case $v in
 	zmir)    sed 's/^wall = zmax white/wall = zmax mirror/' "$SRC/mirror11.ppfd" > "$WORK/bedls_$v.ppfd" ;;
-	floor)   sed 's/^canopy = 0.4 0.2 2.0 0.5 leaf  0.5 0.9 0.2 0.8/canopy = 0.4 0.0 2.0 0.5 leaf  0.5 0.9 0.2 0.8/' \
-	             "$SRC/mirror11.ppfd" > "$WORK/bedls_$v.ppfd" ;;
 	height)  sed 's/^canopy = 0.4 0.2 2.0 0.5 leaf  1.1 1.5 0.2 0.8/canopy = 0.45 0.25 2.0 0.5 leaf  1.1 1.5 0.2 0.8/' \
 	             "$SRC/mirror11ref.ppfd" > "$WORK/bedls_$v.ppfd" ;;
 	noshelf) sed 's/^canopy = 0.4 0.2 2.0 0.5 leaf  1.1 1.5 0.2 0.8/canopy = 0.9 0.7 2.0 0.5 leaf  1.1 1.5 0.2 0.8/' \
@@ -1057,6 +1055,74 @@ ptd=$(sumrow front 14)
 sed 's/^photoperiod/montecarlo = 4000000 3\nphotoperiod/' "$WORK/phottypebf.ppfd" > "$WORK/phottypebmc.ppfd"
 run phottypebmc.ppfd
 chk "phottype: B monte carlo == det" "$(sumrow front 14)" "$ptd" 5e-3
+
+echo "== (ad) canopies resting on a surface (floor / shelf) with leafscatter =="
+# rest.ppfd : 床に乗ったベッド (下段) と棚板に乗った断面全体の群落 (上段)。
+# 面に乗った面の散乱光はその下のパッチが重なりの割合で受け、面はほかの
+# どこからも見えない。棚板で仕切った 2 段 = 段ごとの単独計算 (上段の棚板 =
+# 単独計算の床)。以前は棚板に乗った群落の下面の光が棚板を素通りして下の段へ
+# 漏れ (rack3 の上段を棚板に乗せると下段の群落の上 +2.4%)、床に乗ったベッドは弾いていた
+run rest.ppfd
+rsc=$(logval 'absorbed by canopy')
+chkabs "rest: closure" "$(logval 'closure error')" 1e-4
+for t in a_top a_in b_top b_in; do cp "$WORK/ppfd_map_$t.csv" "$WORK/map_rs$t.csv"; done
+# 面に乗った面の分配は「重なりの割合」の総和 = 面積 (ベッドの縁は床のパッチの格子にそろえていない)
+chk "rest: bed on floor plane sum" "$(awk '/^  slab 1 / {print $NF; exit}' "$WORK/ppfd.log")" 1 1e-4
+sed -e 's/^canopy = .*/canopy = 0.20 0.0 2.0 0.5 leaf  0.2 0.7 0.15 0.85/' -e 's/^target = a_in   0.15/target = a_in   0.10/' \
+	"$SRC/rack3a.ppfd" > "$WORK/restlo.ppfd"
+run restlo.ppfd
+rlc=$(logval 'absorbed by canopy')
+chkabs "rest: lower == alone (top)" "$(maxdiff map_rsa_top.csv ppfd_map_a_top.csv)" 1e-6
+chkabs "rest: lower == alone (in)"  "$(maxdiff map_rsa_in.csv ppfd_map_a_in.csv)" 1e-6
+sed -e 's/^wall = zmin tray/wall = zmin white/' -e 's/^led = .*/led = 0.6 0.4 0.45 0.8 white4000 beam 1/' \
+    -e 's/^canopy = .*/canopy = 0.20 0.0 1.5 0.5 leaf/' \
+    -e 's/^target = a_top  0.30/target = b_top  0.30/' -e 's/^target = a_in   0.15/target = b_in   0.10/' \
+	"$SRC/rack3a.ppfd" > "$WORK/restup.ppfd"
+run restup.ppfd
+ruc=$(logval 'absorbed by canopy')
+chkabs "rest: upper == alone (top)" "$(maxdiff map_rsb_top.csv ppfd_map_b_top.csv)" 1e-6
+chkabs "rest: upper == alone (in)"  "$(maxdiff map_rsb_in.csv ppfd_map_b_in.csv)" 1e-6
+chk "rest: canopy abs = sum" "$rsc" "$(awk -v a="$rlc" -v b="$ruc" 'BEGIN {printf "%.9g", a + b}')" 1e-5
+# 連続性 : 上段の群落を 1e-6 m 浮かせる (面はどこにも乗らず、形態係数で配る)
+sed 's/^canopy = 0.70 0.50/canopy = 0.70 0.500001/' "$SRC/rest.ppfd" > "$WORK/restlift.ppfd"
+run restlift.ppfd
+chkabs "rest: lifted 1e-6 (top)" "$(maxdiff map_rsb_top.csv ppfd_map_b_top.csv)" 1e-5
+chkabs "rest: lifted 1e-6 (in)"  "$(maxdiff map_rsb_in.csv ppfd_map_b_in.csv)" 1e-5
+chkabs "rest: lifted 1e-6 (lower)" "$(maxdiff map_rsa_in.csv ppfd_map_a_in.csv)" 1e-5
+# 床に乗ったベッドどうし : x = 0.5 で割った 2 つのベッド = 床に乗った断面全体の 1 枚
+sed 's/^canopy = 0.4 0.2 2.0 0.5 leaf/canopy = 0.2 0.0 2.0 0.5 leaf/' "$SRC/bedscat.ppfd" > "$WORK/restf1.ppfd"
+run restf1.ppfd
+for t in above mid below; do cp "$WORK/ppfd_map_$t.csv" "$WORK/map_rf$t.csv"; done
+sed 's/^canopy = 0.4 0.2 2.0 0.5 leaf/canopy = 0.2 0.0 2.0 0.5 leaf  0 0.5 0 1\ncanopy = 0.2 0.0 2.0 0.5 leaf  0.5 1 0 1/' \
+	"$SRC/bedscat.ppfd" > "$WORK/restf2.ppfd"
+run restf2.ppfd
+chkabs "rest: 2 beds on floor == slab (above)" "$(maxdiff map_rfabove.csv ppfd_map_above.csv)" 1e-6
+chkabs "rest: 2 beds on floor == slab (in)"    "$(maxdiff map_rfbelow.csv ppfd_map_below.csv)" 1e-6
+# 鏡面の側壁の隣の、床に乗ったベッド = x 方向に 2 倍 (ベッドの縁は床の格子にそろえていない)
+sed 's/^canopy = 0.4 0.2 2.0/canopy = 0.4 0.0 2.0/' "$SRC/mirror11.ppfd" > "$WORK/restm.ppfd"
+run restm.ppfd
+chkabs "rest: mirror bed on floor closure" "$(logval 'closure error')" 1e-6
+rmc=$(logval 'absorbed by canopy')
+for t in above mid below; do cp "$WORK/ppfd_map_$t.csv" "$WORK/map_rm$t.csv"; done
+sed 's/^canopy = 0.4 0.2 2.0/canopy = 0.4 0.0 2.0/' "$SRC/mirror11ref.ppfd" > "$WORK/restmr.ppfd"
+run restmr.ppfd
+chkabs "rest: mirror equiv. (above)" "$(maxdiff map_rmabove.csv ppfd_map_above.csv)" 1e-6
+chkabs "rest: mirror equiv. (in)"    "$(maxdiff map_rmmid.csv ppfd_map_mid.csv)" 1e-6
+chk "rest: mirror canopy abs" "$rmc" "$(awk -v a="$(logval 'absorbed by canopy')" 'BEGIN {printf "%.9g", a / 2}')" 1e-5
+# 弾く組み合わせ : 面の一部だけが乗る (覆われない部分だけを配る経路を持たない)
+for v in shelf tray; do
+	case $v in
+	shelf) sed 's/^occluder = shelf 0 1 0 1/occluder = shelf 0 1 0 0.9/' "$SRC/rest.ppfd" > "$WORK/restbad_$v.ppfd" ;;
+	tray)  sed -e 's/^occluder = shelf.*/&\noccluder = tray 0.3 0.6 0.3 0.6 0.0 0.1 tray/' \
+	           -e 's/^canopy = 0.20 0.0 2.0/canopy = 0.30 0.1 2.0/' "$SRC/rest.ppfd" > "$WORK/restbad_$v.ppfd" ;;
+	esac
+	if (cd "$WORK" && "$OPPFD" "restbad_$v.ppfd" > /dev/null 2>&1); then
+		echo "rest: partly resting ($v) rejected -> NG (accepted)" >&2
+		status=1
+	else
+		echo "rest: partly resting ($v) rejected -> OK"
+	fi
+done
 
 echo
 if [ "$status" -ne 0 ]; then

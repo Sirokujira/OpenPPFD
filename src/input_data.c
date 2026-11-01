@@ -494,6 +494,43 @@ static int emitter_options(ppfd_t *p, emitter_t *e, char **tok, int ntok, int k)
 	return 0;
 }
 
+/*
+群落スラブの上面 (side = 1) / 下面 (side = 0) が、同一平面で向かい合う面に
+乗っている面積 [m²]。向かい合う面は、下面なら床・棚板の上面・水平な板、
+上面なら天井・棚板の下面・水平な板 (板は両面)。重なる面どうしがあれば
+二重に数える (そうした入力は呼び出し側で弾く)。
+*/
+static double face_cover(const ppfd_t *p, const cslab_t *c, int side)
+{
+	const double tol = 1e-9 * p->Lz;
+	const double zf = side ? c->ztop : c->zbot;
+	double a = 0.0;
+	int    i;
+
+	if ((side == 0) ? (zf <= tol) : (zf >= p->Lz - tol)) {
+		a += (c->x1 - c->x0) * (c->y1 - c->y0);
+	}
+	for (i = 0; i < p->nocc; i++) {
+		const occluder_t *o = &p->occ[i];
+		const double zo = side ? o->z0 : o->z1;
+		const double wx = ((o->x1 < c->x1) ? o->x1 : c->x1) - ((o->x0 > c->x0) ? o->x0 : c->x0);
+		const double wy = ((o->y1 < c->y1) ? o->y1 : c->y1) - ((o->y0 > c->y0) ? o->y0 : c->y0);
+		if ((fabs(zo - zf) > tol) || (wx <= 0.0) || (wy <= 0.0)) continue;
+		a += wx * wy;
+	}
+	for (i = 0; i < p->npanel; i++) {
+		const panel_t *pn = &p->panel[i];
+		vec3_t q[4];
+		if ((fabs(fabs(pn->n.z) - 1.0) > 1e-9) || (fabs(pn->org.z - zf) > tol)) continue;
+		q[0] = pn->org;
+		q[1] = v_add(pn->org, pn->eu);
+		q[2] = v_add(q[1], pn->ev);
+		q[3] = v_add(pn->org, pn->ev);
+		a += poly_rect_area(q, 4, c->x0, c->x1, c->y0, c->y1);
+	}
+	return a;
+}
+
 int input_data(FILE *fp, ppfd_t *p)
 {
 	int    nline = 0, ierr = 0;
@@ -1296,11 +1333,40 @@ int input_data(FILE *fp, ppfd_t *p)
 			    断面全体のスラブの埋没パッチと同じ近似で、収支は閉じる)
 			  - 隣の段との間に断面いっぱいの棚板を要求する (ベッドの面から出た
 			    光が通路を抜けて別の段のベッドを通る経路を運べないため)
-			  - 床・天井の鏡面とは併用させず、床・天井にも接しない (面の鏡像が
-			    別のベッドの面へ戻る経路、面が壁に乗る場合の受け渡しを持たない)
+			  - 床・天井の鏡面とは併用させない (面の鏡像が別のベッドの面へ戻る
+			    経路を持たない)。床・天井・トレイに乗るのは可 (上の resttop / restbot)
 			*/
 			const int zmir = (p->mat[p->wallmat[4]].rhos > 0.0) || (p->mat[p->wallmat[5]].rhos > 0.0);
-			const double tol = 1e-9 * p->Lz;
+			/*
+			面が何かに乗っているか。同一平面で向かい合う面 (床・棚板の上面など)
+			が面を全部覆えば、面から出る散乱光はそのパッチがそのまま受け、面は
+			ほかのどこからも見えない (canopy_setup / gather_target)。一部だけ
+			覆うなら、覆われていない部分だけを他へ配る経路を持たないので弾く
+			(以前は覆われた部分の光が棚板を素通りして下の段へ漏れていた)。
+			*/
+			for (j = 0; j < p->nslab; j++) {
+				cslab_t *c = &p->slab[j];
+				const double ac = (c->x1 - c->x0) * (c->y1 - c->y0);
+				int side;
+				for (side = 0; side < 2; side++) {
+					const double cov = face_cover(p, c, side);
+					if (cov > ac * (1.0 + 1e-9)) {
+						fprintf(stderr, "*** leafscatter : surfaces under/over the canopy face z = %g overlap\n",
+							side ? c->ztop : c->zbot);
+						return 1;
+					}
+					if (cov >= ac * (1.0 - 1e-9)) {
+						if (side) c->resttop = 1;
+						else      c->restbot = 1;
+					}
+					else if (cov > ac * 1e-9) {
+						fprintf(stderr, "*** leafscatter : the canopy %s face z = %g rests only partly on a surface "
+							"(%.4g of %.4g m2)\n", side ? "top" : "bottom", side ? c->ztop : c->zbot, cov, ac);
+						fprintf(stderr, "    (make the shelf/tray cover the canopy footprint, or leave a gap)\n");
+						return 1;
+					}
+				}
+			}
 			for (j = 0; j < p->nslab; j++) {
 				int bedtier = !p->slab[j].full;
 				for (k = 0; k < p->nslab; k++) {
@@ -1319,10 +1385,6 @@ int input_data(FILE *fp, ppfd_t *p)
 				if (!bedtier) continue;
 				if (zmir) {
 					fprintf(stderr, "*** leafscatter : canopy beds cannot be combined with a specular floor/ceiling\n");
-					return 1;
-				}
-				if ((p->slab[j].zbot <= tol) || (p->slab[j].ztop >= p->Lz - tol)) {
-					fprintf(stderr, "*** leafscatter : canopy beds must not touch the floor/ceiling\n");
 					return 1;
 				}
 				/* 隣の段との間の棚板 */

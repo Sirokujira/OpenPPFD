@@ -91,6 +91,8 @@ static void gather_target(ppfd_t *p)
 						const double zc = istop ? sl->ztop : sl->zbot;
 						const double *bf = istop ? bt : bb;
 						double f;
+						/* 面が棚板・床などに乗っていれば、面は向こう側から見えない */
+						if (istop ? sl->resttop : sl->restbot) continue;
 						/* 面の矩形 (栽培ベッドならベッドの範囲。断面全体なら従来どおり) */
 						c0[0] = v_make(sl->x0, sl->y0, zc); c0[1] = v_make(sl->x1, sl->y0, zc);
 						c0[2] = v_make(sl->x1, sl->y1, zc); c0[3] = v_make(sl->x0, sl->y1, zc);

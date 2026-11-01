@@ -528,6 +528,31 @@ static double slab_area(const cslab_t *sl)
 }
 
 /*
+群落スラブ sl の上面 (side = 1) / 下面 (side = 0) が乗っている面のパッチ q が、
+面と重なる割合 (q の面積に対する比)。q が面と同一平面で向かい合っていなければ
+0。q がベッドの範囲に丸ごと入るなら厳密に 1 (断面全体のスラブが床に乗る従来の
+場合と 1 ビットも変わらない)。
+*/
+static double rest_frac(const patch_t *q, const cslab_t *sl, int side, double tol)
+{
+	const double zf = side ? sl->ztop : sl->zbot;
+	const double nzw = side ? -1.0 : 1.0;
+	double xmin = q->p[0].x, xmax = q->p[0].x, ymin = q->p[0].y, ymax = q->p[0].y;
+	int    v;
+
+	if ((fabs(q->n.z - nzw) > 1e-9) || (fabs(q->c.z - zf) > tol) || (q->area <= 0.0)) return 0.0;
+	for (v = 1; v < 4; v++) {
+		if (q->p[v].x < xmin) xmin = q->p[v].x;
+		if (q->p[v].x > xmax) xmax = q->p[v].x;
+		if (q->p[v].y < ymin) ymin = q->p[v].y;
+		if (q->p[v].y > ymax) ymax = q->p[v].y;
+	}
+	if ((xmax <= sl->x0) || (xmin >= sl->x1) || (ymax <= sl->y0) || (ymin >= sl->y1)) return 0.0;
+	if ((xmin >= sl->x0) && (xmax <= sl->x1) && (ymin >= sl->y0) && (ymax <= sl->y1)) return 1.0;
+	return poly_rect_area(q->p, 4, sl->x0, sl->x1, sl->y0, sl->y1) / q->area;
+}
+
+/*
 群落の上面 / 下面 (またはその鏡像) の多角形 poly4 への、パッチ q からの
 形態係数。半空間 gn·(x - gp) > 0 にある求積点だけが見る (gn が零ベクトル
 なら判定しない)。
@@ -731,7 +756,11 @@ void canopy_setup(ppfd_t *p)
 		if (jd < 0) continue;
 		canopy_plane(p, js, 0, pb);
 		canopy_plane(p, jd, 1, pt);
-		if (p->slab[js].zbot - p->slab[jd].ztop <= tol) {
+		if (p->slab[js].restbot || p->slab[jd].resttop) {
+			/* どちらかの面が棚板に乗っていれば、面は棚板の向こうを見ない */
+			cx = 0.0;
+		}
+		else if (p->slab[js].zbot - p->slab[jd].ztop <= tol) {
 			cx = 1.0;
 		}
 		else {
@@ -774,8 +803,15 @@ void canopy_setup(ppfd_t *p)
 		const vec3_t gup = v_make(0.0, 0.0, 1.0), gdn = v_make(0.0, 0.0, -1.0);
 		const vec3_t zero = v_make(0.0, 0.0, 0.0);
 		const double tol = 1e-9 * p->Lz;
-		/* 面が床・天井に接している (面がそのまま壁に乗る) */
-		const int ontop = (sl->ztop >= p->Lz - tol), onbot = (sl->zbot <= tol);
+		/*
+		面が何かに乗っている (面と同一平面で向かい合うパッチが面を覆う : 床・
+		天井・棚板の面・水平な板)。面から出る放射はそのパッチが重なりの割合で
+		そのまま受け、面はほかのどこからも見えない (入力段で全部覆うことを
+		確かめてある)。onwall は面がチャンバの壁に乗っている場合 (鏡面の
+		床・天井なら ρs の分が同じ面へ戻る)。
+		*/
+		const int ontop = sl->resttop, onbot = sl->restbot;
+		const int onwtop = (sl->ztop >= p->Lz - tol), onwbot = (sl->zbot <= tol);
 		/*
 		面を見るのは、隣のスラブの手前までのパッチ (向こうは隣のスラブの面が
 		断面全体をふさぐ)。上面の向こう = 上のスラブの下面より上、下面の向こう
@@ -805,8 +841,8 @@ void canopy_setup(ppfd_t *p)
 			const double stop = 1.0 - p->mat[q->imat].rhos;
 			int t, v;
 			/* 上面は「群落より上」の求積点だけ、下面は「群落より下」だけが見る */
-			fu[i] = plane_ff(p, q, ptop, ptop[0], gup, hasup ? gtop2 : NULL, NULL);
-			fd[i] = plane_ff(p, q, pbot, pbot[0], gdn, hasdn ? gbot2 : NULL, NULL);
+			fu[i] = ontop ? 0.0 : plane_ff(p, q, ptop, ptop[0], gup, hasup ? gtop2 : NULL, NULL);
+			fd[i] = onbot ? 0.0 : plane_ff(p, q, pbot, pbot[0], gdn, hasdn ? gbot2 : NULL, NULL);
 			/*
 			鏡面で折り返して見える上下面 (面の鏡像)。側壁の鏡映 (n2 = 0) は
 			z を保つ。最上段の上面は天井で 1 回だけ (n2 = +1)、最下段の下面は
@@ -820,16 +856,16 @@ void canopy_setup(ppfd_t *p)
 					it[v] = spec_apply(p, &tr[t], ptop[v]);
 					ib[v] = spec_apply(p, &tr[t], pbot[v]);
 				}
-				if ((tr[t].n[2] == 0) || ((tr[t].n[2] == 1) && !hasup)) {
+				if (!ontop && ((tr[t].n[2] == 0) || ((tr[t].n[2] == 1) && !hasup))) {
 					fu[i] += tr[t].w * plane_ff(p, q, it, ptop[0], gup, hasup ? gtop2 : NULL, tr[t].n);
 				}
-				if ((tr[t].n[2] == 0) || ((tr[t].n[2] == -1) && !hasdn)) {
+				if (!onbot && ((tr[t].n[2] == 0) || ((tr[t].n[2] == -1) && !hasdn))) {
 					fd[i] += tr[t].w * plane_ff(p, q, ib, pbot[0], gdn, hasdn ? gbot2 : NULL, tr[t].n);
 				}
 			}
-			/* 面が壁に乗っているとき、その壁のパッチは面の放射を全部受ける */
-			if (ontop && (q->iface == 5)) fu[i] = 1.0;
-			if (onbot && (q->iface == 4)) fd[i] = 1.0;
+			/* 面が乗っている面のパッチは、重なる部分で面の放射をそのまま受ける */
+			if (ontop) fu[i] = rest_frac(q, sl, 1, tol);
+			if (onbot) fd[i] = rest_frac(q, sl, 0, tol);
 			sup += (q->area * stop) * fu[i];
 			sdn += (q->area * stop) * fd[i];
 			if ((fu[i] <= 0.0) && (fd[i] <= 0.0)
@@ -852,6 +888,7 @@ void canopy_setup(ppfd_t *p)
 				const vec3_t *pl = (side == 0) ? ptop : pbot;
 				const int want = (side == 0) ? 1 : -1;
 				const int onw = (side == 0) ? ontop : onbot;
+				const int onwall = (side == 0) ? onwtop : onwbot;
 				const double rsw = p->mat[p->wallmat[(side == 0) ? 5 : 4]].rhos;
 				/* 同じ面へ戻るのは最上段の上面 / 最下段の下面だけ */
 				const int outer = (side == 0) ? !hasup : !hasdn;
@@ -860,7 +897,8 @@ void canopy_setup(ppfd_t *p)
 					r = 0.0;
 				}
 				else if (onw) {
-					r = rsw;
+					/* 棚板・板の鏡面は入力段で弾くので、戻るのは鏡面の床・天井だけ */
+					r = onwall ? rsw : 0.0;
 				}
 				else if (rsw > 0.0) {
 					const vec3_t eu = v_sub(pl[1], pl[0]);

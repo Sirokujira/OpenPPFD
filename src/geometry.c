@@ -419,6 +419,59 @@ void setup_target(ppfd_t *p)
 }
 
 /*
+水平な平面多角形 (頂点 nv <= 8) を xy の矩形 [x0,x1] x [y0,y1] で切り取った
+面積 (xy への射影)。Sutherland-Hodgman で 4 本の半平面に順に切る (頂点は
+1 本ごとに高々 1 個増えるので 8 + 4 = 12 個で足りる)。群落の面がそのまま
+棚板・床などに乗っているとき、面と重なる部分の割合を求めるのに使う。
+*/
+double poly_rect_area(const vec3_t *poly, int nv, double x0, double x1, double y0, double y1)
+{
+	double ax[16], ay[16], bx[16], by[16];
+	int    na, nb, k, e, i;
+	double a = 0.0;
+
+	if ((nv < 3) || (nv > 8)) return 0.0;
+	na = nv;
+	for (i = 0; i < nv; i++) {
+		ax[i] = poly[i].x;
+		ay[i] = poly[i].y;
+	}
+	for (e = 0; e < 4; e++) {
+		nb = 0;
+		for (k = 0; k < na; k++) {
+			const int k2 = (k + 1) % na;
+			/* 半平面の内側なら d >= 0 (e = 0..3 : x >= x0, x <= x1, y >= y0, y <= y1) */
+			const double d1 = (e == 0) ? (ax[k] - x0) : (e == 1) ? (x1 - ax[k])
+			                : (e == 2) ? (ay[k] - y0) : (y1 - ay[k]);
+			const double d2 = (e == 0) ? (ax[k2] - x0) : (e == 1) ? (x1 - ax[k2])
+			                : (e == 2) ? (ay[k2] - y0) : (y1 - ay[k2]);
+			if (d1 >= 0.0) {
+				bx[nb] = ax[k];
+				by[nb] = ay[k];
+				nb++;
+			}
+			if (((d1 >= 0.0) && (d2 < 0.0)) || ((d1 < 0.0) && (d2 >= 0.0))) {
+				const double t = d1 / (d1 - d2);
+				bx[nb] = ax[k] + (t * (ax[k2] - ax[k]));
+				by[nb] = ay[k] + (t * (ay[k2] - ay[k]));
+				nb++;
+			}
+		}
+		na = nb;
+		for (k = 0; k < na; k++) {
+			ax[k] = bx[k];
+			ay[k] = by[k];
+		}
+		if (na < 3) return 0.0;
+	}
+	for (k = 0; k < na; k++) {
+		const int k2 = (k + 1) % na;
+		a += (ax[k] * ay[k2]) - (ax[k2] * ay[k]);
+	}
+	return 0.5 * fabs(a);
+}
+
+/*
 鏡像へ引いた直線の z 座標を実経路の z 座標へ写す「折り返し」。
 
 床・天井が鏡面のとき、鏡像への直線は箱型ビリヤードの展開そのものなので、
