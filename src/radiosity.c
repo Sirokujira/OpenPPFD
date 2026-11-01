@@ -54,7 +54,7 @@ void solve_radiosity(ppfd_t *p)
 		}
 		if (scat) {
 			int m;
-			for (m = 0; m < p->canopy.nlayer; m++) {
+			for (m = 0; m < p->cnl; m++) {
 				if (p->cdep[((size_t)m * nl) + il] > 0.0) active = 1;
 			}
 		}
@@ -109,8 +109,6 @@ void solve_radiosity(ppfd_t *p)
 
 		for (iter = 0; iter < p->maxiter; iter++) {
 			double dmax = 0.0, bmax = 0.0;
-			double etop = 0.0, ebot = 0.0;
-
 			if (scat) {
 				/*
 				群落の拡散場を現在の B から解き直す。反復行列の一部として
@@ -118,8 +116,6 @@ void solve_radiosity(ppfd_t *p)
 				*/
 				double aw = 0.0, sw = 0.0;
 				canopy_field(p, il, Bfull, &aw, &sw);
-				etop = p->cbtop[il];
-				ebot = p->cbbot[il];
 			}
 
 #ifdef _OPENMP
@@ -133,7 +129,12 @@ void solve_radiosity(ppfd_t *p)
 					g += Fi[j] * Bold[j];
 				}
 				if (scat) {
-					g += (p->cffup[i] * etop) + (p->cffdn[i] * ebot);
+					int js;
+					for (js = 0; js < p->nslab; js++) {
+						const size_t ks = ((size_t)js * n) + i;
+						const size_t kl = ((size_t)js * nl) + il;
+						g += (p->cffup[ks] * p->cbtop[kl]) + (p->cffdn[ks] * p->cbbot[kl]);
+					}
 				}
 				Bnew[i] = p->mat[p->patch[i].imat].rho[il] * g;
 			}
@@ -175,7 +176,12 @@ void solve_radiosity(ppfd_t *p)
 				g += Fi[j] * Bold[j];
 			}
 			if (scat) {
-				g += (p->cffup[i] * p->cbtop[il]) + (p->cffdn[i] * p->cbbot[il]);
+				int js;
+				for (js = 0; js < p->nslab; js++) {
+					const size_t ks = ((size_t)js * n) + i;
+					const size_t kl = ((size_t)js * nl) + il;
+					g += (p->cffup[ks] * p->cbtop[kl]) + (p->cffdn[ks] * p->cbbot[kl]);
+				}
 			}
 			p->Einc[((size_t)i * nl) + il] = g;
 			p->B[((size_t)i * nl) + il] = p->mat[p->patch[i].imat].rho[il] * g;

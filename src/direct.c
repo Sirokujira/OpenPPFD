@@ -106,6 +106,7 @@ static int enum_transforms(const ppfd_t *p, strans_t *tr, int maxn, int maxord)
 				const double w2 = w1 * axis_weight(rs, 2, n2);
 				const int    m2 = m1 + ((n2 < 0) ? -n2 : n2);
 				if ((m2 < 1) || (w2 <= 0.0)) continue;
+				if (tr == NULL) { n++; continue; }   /* 数えるだけ */
 				if (n >= maxn) return n;
 				tr[n].n[0] = n0;
 				tr[n].n[1] = n1;
@@ -117,6 +118,28 @@ static int enum_transforms(const ppfd_t *p, strans_t *tr, int maxn, int maxord)
 		}
 	}
 	return n;
+}
+
+/*
+specbounce を変換の上限 MAXSPECT に収める。列挙が途中で打ち切られると、
+ある段の鏡像の一部だけが残り (鏡像の集合が対称でなくなる)、打ち切り放射束
+(order = specbounce+1 の重みの総和) も嘘になる。そこで「specbounce+1 段まで
+の変換が全部入る」最大の段数へ下げ、下げたことをログに出す (精度を落とす
+変更を黙って行わない)。必要な変換の数は鏡面の軸の数で大きく違う
+(鏡面 1 面なら段数によらず 1 個、同じ軸の 2 面なら 2N 個、3 軸なら N³ 程度)
+ので、段数そのものに固定の上限は置かない。
+*/
+void spec_fit_order(ppfd_t *p)
+{
+	const int req = p->specbounce;
+
+	while ((p->specbounce > 0) && (enum_transforms(p, NULL, 0, p->specbounce + 1) > MAXSPECT)) {
+		p->specbounce--;
+	}
+	if (p->specbounce != req) {
+		plog(p, "specular : specbounce reduced %d -> %d (more than %d mirror transforms)\n",
+			req, p->specbounce, MAXSPECT);
+	}
 }
 
 /* 拡散光の輸送用 : specbounce 段までの変換 (setup_images と同一の数え方) */
@@ -232,7 +255,7 @@ void direct_point_ex(const ppfd_t *p, vec3_t x, vec3_t n, double *E, double *dep
 	int    ie, i;
 	double *acc = NULL;
 	double  tr[512];
-	const int nl = p->canopy.nlayer;
+	const int nl = p->canopy.scatter ? p->cnl : p->canopy.nlayer;
 	const int use_acc = (!p->canopy.on) && (p->nspec <= 4096);
 
 	if (use_acc) {
@@ -363,7 +386,7 @@ static void patch_quadrature(const ppfd_t *p, const patch_t *q, int msub, double
 		0.5 * 0.5555555555555556, 0.5 * 0.8888888888888888, 0.5 * 0.5555555555555556
 	};
 	const int ns = p->nspec;
-	const int nl = p->canopy.nlayer;
+	const int nl = p->canopy.scatter ? p->cnl : p->canopy.nlayer;
 	const vec3_t eu = v_sub(q->p[1], q->p[0]);
 	const vec3_t ev = v_sub(q->p[3], q->p[0]);
 	const double h = 1.0 / msub;
@@ -396,7 +419,7 @@ static void patch_quadrature(const ppfd_t *p, const patch_t *q, int msub, double
 void direct_patch(ppfd_t *p)
 {
 	const int n = p->npatch;
-	const int nl = p->canopy.nlayer;
+	const int nl = p->canopy.scatter ? p->cnl : p->canopy.nlayer;
 	const int ns = p->nspec;
 	double *cd = NULL;
 	int ip;

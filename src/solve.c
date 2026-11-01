@@ -24,22 +24,9 @@ static void gather_target(ppfd_t *p)
 	const int n = p->npatch;
 	const int nl = p->nlam;
 	double *kext = (double *)xcalloc((size_t)nl, sizeof(double));
-	vec3_t  ctop[4], cbot[4];
 	strans_t *str = (strans_t *)xmalloc((size_t)MAXSPECT * sizeof(strans_t));
 	const int nstr = spec_transforms(p, str, MAXSPECT);
 	int     it, i;
-
-	if (p->canopy.on && p->canopy.scatter) {
-		const double zt = p->canopy.ztop, zb = p->canopy.zbot;
-		ctop[0] = v_make(0.0, 0.0, zt);   ctop[1] = v_make(p->Lx, 0.0, zt);
-		ctop[2] = v_make(p->Lx, p->Ly, zt); ctop[3] = v_make(0.0, p->Ly, zt);
-		cbot[0] = v_make(0.0, 0.0, zb);   cbot[1] = v_make(p->Lx, 0.0, zb);
-		cbot[2] = v_make(p->Lx, p->Ly, zb); cbot[3] = v_make(0.0, p->Ly, zb);
-	}
-	else {
-		memset(ctop, 0, sizeof(ctop));
-		memset(cbot, 0, sizeof(cbot));
-	}
 
 	if (p->canopy.on) {
 		for (i = 0; i < nl; i++) kext[i] = canopy_kext(p, i);
@@ -74,30 +61,37 @@ static void gather_target(ppfd_t *p)
 			direct_point(p, x, nz, E);
 
 			if (p->canopy.on && p->canopy.scatter) {
-				/* 群落が返す拡散光 : 外なら上下面から、内部なら層の下向き流束 */
-				if (x.z >= p->canopy.ztop) {
-					double f = ff_point_poly(x, nz, ctop, 4);
-					for (i2 = 0; i2 < nstr; i2++) {
-						/* 側壁の鏡面で折り返して見える上面 (面の鏡像) */
-						vec3_t c4[4];
-						int    v;
-						for (v = 0; v < 4; v++) c4[v] = spec_apply(p, &str[i2], ctop[v]);
-						f += str[i2].w * ff_point_poly(x, nz, c4, 4);
+				/*
+				群落が返す拡散光 : スラブごとに、外なら上下面から、内部なら層の
+				流束から。遮蔽物があれば面を小矩形に割って可視率を掛ける (棚板の
+				向こうのスラブの面は見えない = 0)。
+				*/
+				int js;
+				for (js = 0; js < p->nslab; js++) {
+					const cslab_t *sl = &p->slab[js];
+					const double *bt = &p->cbtop[(size_t)js * nl];
+					const double *bb = &p->cbbot[(size_t)js * nl];
+					vec3_t c0[4];
+					if ((x.z >= sl->ztop) || (x.z <= sl->zbot)) {
+						const int istop = (x.z >= sl->ztop);
+						const double zc = istop ? sl->ztop : sl->zbot;
+						const double *bf = istop ? bt : bb;
+						double f;
+						c0[0] = v_make(0.0, 0.0, zc);     c0[1] = v_make(p->Lx, 0.0, zc);
+						c0[2] = v_make(p->Lx, p->Ly, zc); c0[3] = v_make(0.0, p->Ly, zc);
+						f = canopy_plane_ff_point(p, x, nz, c0, NULL);
+						for (i2 = 0; i2 < nstr; i2++) {
+							/* 側壁の鏡面で折り返して見える面 (面の鏡像) */
+							vec3_t c4[4];
+							int    v;
+							for (v = 0; v < 4; v++) c4[v] = spec_apply(p, &str[i2], c0[v]);
+							f += str[i2].w * canopy_plane_ff_point(p, x, nz, c4, str[i2].n);
+						}
+						for (il = 0; il < nl; il++) E[il] += f * bf[il];
 					}
-					for (il = 0; il < nl; il++) E[il] += f * p->cbtop[il];
-				}
-				else if (x.z <= p->canopy.zbot) {
-					double f = ff_point_poly(x, nz, cbot, 4);
-					for (i2 = 0; i2 < nstr; i2++) {
-						vec3_t c4[4];
-						int    v;
-						for (v = 0; v < 4; v++) c4[v] = spec_apply(p, &str[i2], cbot[v]);
-						f += str[i2].w * ff_point_poly(x, nz, c4, 4);
+					else {
+						for (il = 0; il < nl; il++) E[il] += canopy_interior(p, js, il, x.z, nz.z);
 					}
-					for (il = 0; il < nl; il++) E[il] += f * p->cbbot[il];
-				}
-				else {
-					for (il = 0; il < nl; il++) E[il] += canopy_interior(p, il, x.z, nz.z);
 				}
 			}
 
@@ -236,6 +230,7 @@ void solve(ppfd_t *p)
 	double t0;
 
 	t0 = cputime();
+	spec_fit_order(p);
 	setup_patch(p);
 	setup_target(p);
 	{
@@ -259,9 +254,20 @@ void solve(ppfd_t *p)
 		p->ff_rowsum_err, p->ff_recip_err, cputime() - t0);
 	if (p->canopy.on && p->canopy.scatter) {
 		canopy_setup(p);
-		plog(p, "canopy scatter : %d layers, plane closure up/down = %.4f / %.4f, "
-			"buried patches = %d of %d\n",
-			p->canopy.nlayer, p->cnorm_up, p->cnorm_dn, p->cnburied, p->npatch);
+		if (p->nslab == 1) {
+			plog(p, "canopy scatter : %d layers, plane closure up/down = %.4f / %.4f, "
+				"buried patches = %d of %d\n",
+				p->canopy.nlayer, p->cnorm_up[0], p->cnorm_dn[0], p->cnburied, p->npatch);
+		}
+		else {
+			int js;
+			plog(p, "canopy scatter : %d slabs x %d layers, buried patches = %d of %d\n",
+				p->nslab, p->canopy.nlayer, p->cnburied, p->npatch);
+			for (js = 0; js < p->nslab; js++) {
+				plog(p, "  slab %d (z = %g..%g) : plane closure up/down = %.4f / %.4f\n",
+					js, p->slab[js].zbot, p->slab[js].ztop, p->cnorm_up[js], p->cnorm_dn[js]);
+			}
+		}
 	}
 	if (occ_any(p)) {
 		/* 遮蔽が部分的な対だけは標本化 (= 厳密でない) なので数を出す */

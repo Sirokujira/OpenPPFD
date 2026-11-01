@@ -973,9 +973,13 @@ int input_data(FILE *fp, ppfd_t *p)
 			if (p->canopy.nlayer > 256) p->canopy.nlayer = 256;
 		}
 		else if (!strcmp(token[0], "specbounce")) {
+			/* 上限は変換の数で決める (spec_fit_order が下げたらログに出す) */
 			p->specbounce = atoi(token[2]);
 			if (p->specbounce < 0) p->specbounce = 0;
-			if (p->specbounce > 6) p->specbounce = 6;
+			if (p->specbounce > 64) {
+				fprintf(stderr, "*** warning : specbounce %d -> 64\n", p->specbounce);
+				p->specbounce = 64;
+			}
 		}
 		else if (!strcmp(token[0], "quadrature")) {
 			p->msub = atoi(token[2]);
@@ -1155,18 +1159,41 @@ int input_data(FILE *fp, ppfd_t *p)
 					((ref > 0.0) ? ((p->slab[j].k0 * p->slab[j].a) / ref) : 1.0);
 			}
 		}
-		if (p->canopy.scatter && !p->slab[0].full) {
-			fprintf(stderr, "*** leafscatter needs a canopy covering the whole cross-section\n");
-			fprintf(stderr, "    (the two-stream field is horizontally uniform)\n");
-			return 1;
-		}
-		if (p->canopy.scatter && (p->nslab > 1)) {
-			fprintf(stderr, "*** leafscatter supports a single canopy slab only "
-				"(%d given)\n", p->nslab);
-			fprintf(stderr, "    (the two-stream field is one vertical column; "
-				"several columns would have to\n");
-			fprintf(stderr, "     exchange with each other through the cavity)\n");
-			return 1;
+		if (p->canopy.scatter) {
+			for (j = 0; j < p->nslab; j++) {
+				if (!p->slab[j].full) {
+					fprintf(stderr, "*** leafscatter needs canopies covering the whole cross-section\n");
+					fprintf(stderr, "    (the two-stream field is horizontally uniform)\n");
+					return 1;
+				}
+			}
+			/*
+			段ごとのスラブはそれぞれ独立な 1 本のカラムとして解く。そのために
+			隣り合う段の間に「断面いっぱいの棚板」を要求する : 棚板があれば、
+			ある段の上下面から出た散乱光が別の段の群落を通ることも、別の段の
+			面に直接届くこともない (届く先は形態係数の可視率で 0 になる)。
+			棚板が無いと、面から出た光が別のスラブを通る経路の預け入れが
+			要るので弾く。
+			*/
+			for (j = 0; j + 1 < p->nslab; j++) {
+				const double zlo = p->slab[j + 1].ztop, zhi = p->slab[j].zbot;
+				int io, shelf = 0;
+				for (io = 0; io < p->nocc; io++) {
+					const occluder_t *o = &p->occ[io];
+					if ((o->x0 <= EPS) && (o->x1 >= p->Lx - EPS)
+					 && (o->y0 <= EPS) && (o->y1 >= p->Ly - EPS)
+					 && (o->z0 >= zlo - EPS) && (o->z1 <= zhi + EPS)) {
+						shelf = 1;
+						break;
+					}
+				}
+				if (!shelf) {
+					fprintf(stderr, "*** leafscatter with several canopy slabs needs a shelf (occluder) "
+						"covering the whole cross-section between z = %g and %g\n", zlo, zhi);
+					fprintf(stderr, "    (each tier is solved as its own two-stream column)\n");
+					return 1;
+				}
+			}
 		}
 	}
 

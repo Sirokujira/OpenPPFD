@@ -464,7 +464,7 @@ if (cd "$WORK" && "$OPPFD" canopy2mat.ppfd > /dev/null 2>&1); then
 else
 	echo "stacked: mixed leaf rejected -> OK"
 fi
-# 二流の散乱場は 1 本のカラムなので、複数スラブとの併用は弾かれる
+# 段を仕切る棚板が無い複数スラブは、面から出た散乱光が別のスラブを通るので弾かれる (検証 (w))
 sed 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/canopy2.ppfd" > "$WORK/canopy2ls.ppfd"
 if (cd "$WORK" && "$OPPFD" canopy2ls.ppfd > /dev/null 2>&1); then
 	echo "stacked: +leafscatter rejected -> NG (accepted invalid combo)" >&2
@@ -761,6 +761,50 @@ if (cd "$WORK" && "$OPPFD" mirror4ls2.ppfd > /dev/null 2>&1); then
 else
 	echo "specscat: z-mirror rejected -> OK"
 fi
+
+echo "== (w) multi-tier racks with leafscatter (one two-stream column per tier) =="
+# rack3.ppfd : 断面いっぱいの棚板で仕切った 2 段、各段に光源と散乱葉の群落。
+# 段ごとに独立なカラムなので、各段を独立なチャンバとして解いた結果と一致する
+run rack3.ppfd
+r3c=$(logval 'absorbed by canopy'); r3w=$(logval 'absorbed by walls')
+for t in a_top a_in b_top b_in; do cp "$WORK/ppfd_map_$t.csv" "$WORK/map_r3$t.csv"; done
+run rack3a.ppfd
+rac=$(logval 'absorbed by canopy'); raw=$(logval 'absorbed by walls')
+chkabs "tiers: lower == alone (top)"  "$(maxdiff map_r3a_top.csv ppfd_map_a_top.csv)" 1e-6
+chkabs "tiers: lower == alone (in)"   "$(maxdiff map_r3a_in.csv ppfd_map_a_in.csv)" 1e-6
+sed -e 's/^wall = zmin tray/wall = zmin white/' -e 's/^led = .*/led = 0.6 0.4 0.45 0.8 white4000 beam 1/' \
+    -e 's/^canopy = .*/canopy = 0.25 0.05 1.5 0.5 leaf/' \
+    -e 's/^target = a_top  0.30/target = b_top  0.30/' -e 's/^target = a_in   0.15/target = b_in   0.15/' \
+	"$SRC/rack3a.ppfd" > "$WORK/rack3b.ppfd"
+run rack3b.ppfd
+rbc=$(logval 'absorbed by canopy'); rbw=$(logval 'absorbed by walls')
+chkabs "tiers: upper == alone (top)"  "$(maxdiff map_r3b_top.csv ppfd_map_b_top.csv)" 1e-6
+chkabs "tiers: upper == alone (in)"   "$(maxdiff map_r3b_in.csv ppfd_map_b_in.csv)" 1e-6
+chk "tiers: canopy abs = sum" "$r3c" "$(awk -v a="$rac" -v b="$rbc" 'BEGIN {printf "%.9g", a + b}')" 1e-5
+chk "tiers: wall abs = sum"   "$r3w" "$(awk -v a="$raw" -v b="$rbw" 'BEGIN {printf "%.9g", a + b}')" 1e-5
+# 棚板の上へ散乱光が漏れない : 上段の光源と群落を外すと上段の測定面は 0
+sed -e '/^led = 0.6 0.4 0.95/d' -e '/^canopy = 0.75/d' "$SRC/rack3.ppfd" > "$WORK/rack3leak.ppfd"
+run rack3leak.ppfd
+chkabs "tiers: no leak above shelf" "$(sumrow b_top 5)" 0
+# 段を仕切る棚板が無いと、面から出た散乱光が別の段を通るので弾く
+sed '/^occluder = shelf/d' "$SRC/rack3.ppfd" > "$WORK/rack3open.ppfd"
+if (cd "$WORK" && "$OPPFD" rack3open.ppfd > /dev/null 2>&1); then
+	echo "tiers: no shelf rejected -> NG (accepted)" >&2
+	status=1
+else
+	echo "tiers: no shelf rejected -> OK"
+fi
+# specbounce の上限は変換の数で決まる : 鏡面 4 面 (2 軸) なら 14 段まで入り、
+# 打ち切りの収支誤差が 6 段の -1.4% から下がる。上限を超えた要求はログに出して下げる
+sed -e '/^canopy/d' -e 's/^specbounce .*/specbounce  = 20/' "$SRC/difftrans.ppfd" > "$WORK/specdeep.ppfd"
+run specdeep.ppfd
+if grep -q "specbounce reduced 20 -> 14" "$WORK/ppfd.log"; then
+	echo "specbounce: reduction logged -> OK"
+else
+	echo "specbounce: reduction logged -> NG" >&2
+	status=1
+fi
+chkabs "specbounce: deep closure" "$(logval 'closure error')" 3e-3
 
 echo
 if [ "$status" -ne 0 ]; then
