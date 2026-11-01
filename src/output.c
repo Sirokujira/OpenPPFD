@@ -119,8 +119,12 @@ void output_log(ppfd_t *p)
 		if (d->lm > 0.0) plog(p, ", rated %.4g lm", d->lm);
 		if (d->watt > 0.0) plog(p, ", %.4g W", d->watt);
 		plog(p, ") -- shape only, flux taken from the input file\n");
-		if (!d->isldt && (d->ptype != 1)) {
-			plog(p, "  * warning : photometric type %d is not type C; treated as type C\n", d->ptype);
+		if (!d->isldt && (d->ptype == 2 || d->ptype == 3)) {
+			plog(p, "  photometric type %s (H, V : %s)\n", (d->ptype == 3) ? "A" : "B",
+				(d->ptype == 3) ? "azimuth about up / elevation" : "latitude to lateral / rotation about lateral");
+		}
+		else if (!d->isldt && (d->ptype != 1)) {
+			plog(p, "  * warning : photometric type %d is not type A/B/C; treated as type C\n", d->ptype);
 		}
 	}
 

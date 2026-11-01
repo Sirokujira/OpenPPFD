@@ -95,11 +95,7 @@ static vec3_t emit_dir(const ppfd_t *p, const emitter_t *e, double dmax, u64 *s)
 		int k;
 		for (k = 0; k < 100000; k++) {
 			const vec3_t u = sphere(s);
-			double cg = v_dot(u, e->dir), ca, iv;
-			if (cg > 1.0) cg = 1.0;
-			if (cg < -1.0) cg = -1.0;
-			ca = atan2(v_dot(u, e->cy), v_dot(u, e->cx)) * (180.0 / PI) - e->crot;
-			iv = photdist_value(&p->dist[e->idist], acos(cg) * (180.0 / PI), ca);
+			const double iv = photdist_dir(p, e, u);
 			if (urand(s) * dmax < iv) return u;
 		}
 		return e->dir;

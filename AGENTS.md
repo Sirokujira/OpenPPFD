@@ -313,6 +313,14 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
   これを据え置いたまま散乱を戻すと二重計上になる。`leafscatter = on` では
   ビームを `k = G a` (波長非依存) で運び、`√(1-ω)` は解の固有値として
   出力側に現れる。
+- **IES の光度分布型 A / B は器具の座標で角度を測る** (`photdist_dir`)。
+  x = 配光軸、z = 上 (+z を直交させた向き、鉛直なら cx)、y = z × x、`rot` で
+  配光軸まわりに回す。型 A : V = asin(z)、H = atan2(y, x)、`dΩ = cos V dV dH`。
+  型 B : V = atan2(z, x)、H = asin(y)、`dΩ = cos H dH dV`。正規化はこの
+  ヤコビアンで双線形の表を厳密に積分する (`photdist_normalize_ab`)。型 C の
+  経路は以前と同じ演算 (ビット一致)。「帯の配光」で型 A と B の正規化の分母
+  (立体角) が違い、同じ向きが一方では帯の中・他方では外になることを判定に
+  入れてある (取り違えは必ず落ちる)。
 - **実測配光ファイル (IES/LDT) からは配光の形だけを取る**。記載の cd/lm
   は測光量なので、SPD 抜きに放射束 [W] や PPF へは換算できない。
   放射束は入力ファイル側 (W 欄 / `ppf` / `lumens`) が決める。配光は

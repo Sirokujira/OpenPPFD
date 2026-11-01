@@ -342,6 +342,7 @@ double  calc_irradiance(const ppfd_t *, const double *);
 /* photometry.c */
 int     photdist_load(ppfd_t *, const char *, int);
 double  photdist_value(const photdist_t *, double, double);
+double  photdist_dir(const ppfd_t *, const emitter_t *, vec3_t);
 
 /* input_data.c */
 int     input_data(FILE *, ppfd_t *);

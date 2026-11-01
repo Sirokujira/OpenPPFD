@@ -296,12 +296,7 @@ void direct_point_ex(const ppfd_t *p, vec3_t x, vec3_t n, double *E, double *dep
 				if (e->idist >= 0) {
 					/* 実測配光 : Î は ∫Î dΩ = 1 に正規化済みなので I = Φ Î */
 					const vec3_t u = v_scale(r, 1.0 / d);
-					double cg = v_dot(u, e->dir);
-					double ca;
-					if (cg > 1.0) cg = 1.0;
-					if (cg < -1.0) cg = -1.0;
-					ca = atan2(v_dot(u, e->cy), v_dot(u, e->cx)) * (180.0 / PI) - e->crot;
-					inten = fsub * photdist_value(&p->dist[e->idist], acos(cg) * (180.0 / PI), ca);
+					inten = fsub * photdist_dir(p, e, u);
 					if (inten <= 0.0) continue;
 				}
 				else if (e->mexp < 0.0) {

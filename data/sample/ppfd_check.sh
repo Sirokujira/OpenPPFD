@@ -1033,6 +1033,31 @@ sed 's/^montecarlo.*//' "$WORK/mclat0.ppfd" > "$WORK/detlat0.ppfd"
 run detlat0.ppfd
 chk "mc: black leaf == deterministic" "$lat0" "$(sumrow aisle 5)" 1.5e-2
 
+echo "== (ac) IES photometric types A / B =="
+# phottype.ppfd : +x 向きの器具、「|V| <= 30° で一定」の帯。正規化の分母
+# (帯の立体角) が型で違い、型 A の (H, V) = (60°, 25°) の向きは型 B では帯の外
+run phottype.ppfd
+chk "phottype: A on axis"      "$(sumrow axis 14)" 3.0870075 1e-5
+chk "phottype: A (H,V)=(60,25)" "$(sumrow off 14)" 3.0870075 1e-5
+sed 's/bandA\.ies/bandB.ies/' "$SRC/phottype.ppfd" > "$WORK/phottypeb.ppfd"
+run phottypeb.ppfd
+chk "phottype: B on axis"      "$(sumrow axis 14)" 4.5472841 1e-5
+chkabs "phottype: B same dir = 0" "$(sumrow off 14)" 0
+# 正規化は双線形の表の厳密な積分 : 白いキャビティでも壁の吸収 = 放射束
+# (残差は帯の縁が壁パッチをまたぐ直接光の求積 : quadrature 4 で -2.7e-4、16 で -3.0e-5)
+sed -e 's/^material = black gray 0.0/material = black gray 0.0\nmaterial = white gray 0.8/' \
+    -e 's/^wall     = all black/wall     = all white/' -e 's/^photoperiod/quadrature = 16\nphotoperiod/' \
+	"$WORK/phottypeb.ppfd" > "$WORK/phottypebw.ppfd"
+run phottypebw.ppfd
+chkabs "phottype: B white closure" "$(logval 'closure error')" 1e-4
+# 光子追跡でも同じ配光 (棄却法で向きを引く) : 帯を受ける面 x = 0.95 の平均が決定論と一致
+sed 's/^target = floor 0.0 4 4/sensor = front 0.95 1 0  0.95 0 0  0.95 1 1  40 40/' "$WORK/phottypeb.ppfd" > "$WORK/phottypebf.ppfd"
+run phottypebf.ppfd
+ptd=$(sumrow front 14)
+sed 's/^photoperiod/montecarlo = 4000000 3\nphotoperiod/' "$WORK/phottypebf.ppfd" > "$WORK/phottypebmc.ppfd"
+run phottypebmc.ppfd
+chk "phottype: B monte carlo == det" "$(sumrow front 14)" "$ptd" 5e-3
+
 echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2
