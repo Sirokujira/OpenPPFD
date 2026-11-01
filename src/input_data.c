@@ -914,19 +914,8 @@ int input_data(FILE *fp, ppfd_t *p)
 				ierr = 1;
 				continue;
 			}
-			/*
-			葉材料は全スラブで共通にする。減衰は
-			exp(-Σ_j G_j a_j √(1-ω_j) s_j) なので、材料 (= ω) が段ごとに
-			違うと波長ごとの重みが段ごとに変わり、経路長を 1 個の
-			スカラにまとめられなくなる (同じ作物を段ごとに育てるのが
-			多段ラックなので、変わるのは LAI と高さ)。
-			*/
-			if ((p->nslab > 0) && (im != p->canopy.imat)) {
-				fprintf(stderr, "*** all canopy slabs must share one leaf material "
-					"(\"%s\" != \"%s\")\n", p->mat[im].name, p->mat[p->canopy.imat].name);
-				ierr = 1;
-				continue;
-			}
+			/* 葉材料が段ごとに違ってよいかは leafscatter で決まる (入力の読み終わりで判定) */
+			sl.imat = im;
 			sl.a = sl.lai / (sl.ztop - sl.zbot);
 			APPEND(p->slab, p->nslab, cslab, cslab_t);
 			p->slab[p->nslab++] = sl;
@@ -1087,6 +1076,23 @@ int input_data(FILE *fp, ppfd_t *p)
 				const cslab_t t = p->slab[j];
 				p->slab[j] = p->slab[best];
 				p->slab[best] = t;
+			}
+		}
+		/*
+		葉材料は、散乱モデルが無効なら全スラブで共通にする。減衰は
+		exp(-Σ_j G_j a_j √(1-ω_j) s_j) なので、材料 (= ω) が段ごとに違うと
+		波長ごとの重みが段ごとに変わり、パッチ対の経路長を 1 個のスカラに
+		まとめられなくなる。leafscatter = on ではビームを素の遮断 k = G a
+		(波長によらない) で運び、ω は段ごとのカラムにしか現れないので、
+		段ごとに違う葉材料 (段ごとに違う作物) を置ける。
+		*/
+		for (j = 1; j < p->nslab; j++) {
+			if ((p->slab[j].imat != p->slab[0].imat) && !p->canopy.scatter) {
+				fprintf(stderr, "*** canopy slabs with different leaf materials (\"%s\" != \"%s\") "
+					"need leafscatter = on\n", p->mat[p->slab[j].imat].name, p->mat[p->slab[0].imat].name);
+				fprintf(stderr, "    (without scattering the extinction G a sqrt(1-omega) depends on the "
+					"wavelength slab by slab)\n");
+				return 1;
 			}
 		}
 		/*

@@ -180,6 +180,7 @@ typedef struct {
 	double  w;                      /* 先頭スラブ基準の減衰重み = (k0 a) / (k0_0 a_0)。
 	                                   先頭は厳密に 1.0 なので 1 枚だけの入力は
 	                                   従来と 1 ビットも変わらない */
+	int     imat;                   /* 葉材料 (段ごとに違ってよいのは leafscatter = on のとき) */
 	double  x0, x1, y0, y1;         /* 水平範囲 (栽培ベッドの上だけの群落)。省略時は断面全体 */
 	int     full;                   /* 1 : 断面全体を覆う (従来のスラブと同じ経路で計算) */
 } cslab_t;
@@ -330,6 +331,7 @@ int     find_spec(const ppfd_t *, const char *);
 void    canopy_kernel(double, double, double *, double *, double *, double *);
 int     canopy_selftest(void);
 double  canopy_omega(const ppfd_t *, int);
+double  canopy_omega_slab(const ppfd_t *, int, int);
 double  canopy_kext(const ppfd_t *, int);
 double  canopy_segments(const ppfd_t *, vec3_t, vec3_t, double *);
 void    canopy_setup(ppfd_t *);

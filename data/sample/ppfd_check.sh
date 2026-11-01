@@ -768,6 +768,26 @@ chkabs "tiers: upper == alone (top)"  "$(maxdiff map_r3b_top.csv ppfd_map_b_top.
 chkabs "tiers: upper == alone (in)"   "$(maxdiff map_r3b_in.csv ppfd_map_b_in.csv)" 1e-6
 chk "tiers: canopy abs = sum" "$r3c" "$(awk -v a="$rac" -v b="$rbc" 'BEGIN {printf "%.9g", a + b}')" 1e-5
 chk "tiers: wall abs = sum"   "$r3w" "$(awk -v a="$raw" -v b="$rbw" 'BEGIN {printf "%.9g", a + b}')" 1e-5
+# 段ごとに違う葉材料 (leafscatter = on のとき) : 上段だけ別の葉にしても、
+# 上段は「その葉で単独に解いたもの」と一致する (ω は段ごとのカラムにしか現れない)
+sed -e 's/^material = leaf  table .*/&\nmaterial = leaf2 table 400:0.10:0.05 550:0.25:0.20 660:0.08:0.04 730:0.40:0.40/' \
+    -e 's/^canopy = 0.75 0.55 1.5 0.5 leaf/canopy = 0.75 0.55 1.5 0.5 leaf2/' "$SRC/rack3.ppfd" > "$WORK/rack3l2.ppfd"
+run rack3l2.ppfd
+for t in b_top b_in; do cp "$WORK/ppfd_map_$t.csv" "$WORK/map_r3l2$t.csv"; done
+sed -e 's/^canopy = 0.25 0.05 1.5 0.5 leaf/canopy = 0.25 0.05 1.5 0.5 leaf2/' \
+    -e 's/^material = leaf  table .*/&\nmaterial = leaf2 table 400:0.10:0.05 550:0.25:0.20 660:0.08:0.04 730:0.40:0.40/' \
+	"$WORK/rack3b.ppfd" > "$WORK/rack3bl2.ppfd"
+run rack3bl2.ppfd
+chkabs "tiers: per-tier leaf (top)" "$(maxdiff map_r3l2b_top.csv ppfd_map_b_top.csv)" 1e-6
+chkabs "tiers: per-tier leaf (in)"  "$(maxdiff map_r3l2b_in.csv ppfd_map_b_in.csv)" 1e-6
+# 散乱なしでは段ごとの葉材料は経路長 1 本にまとめられないので弾く
+sed '/^leafscatter/d' "$WORK/rack3l2.ppfd" > "$WORK/rack3l2ns.ppfd"
+if (cd "$WORK" && "$OPPFD" rack3l2ns.ppfd > /dev/null 2>&1); then
+	echo "tiers: mixed leaf w/o scatter rejected -> NG (accepted)" >&2
+	status=1
+else
+	echo "tiers: mixed leaf w/o scatter rejected -> OK"
+fi
 # 棚板の上へ散乱光が漏れない : 上段の光源と群落を外すと上段の測定面は 0
 sed -e '/^led = 0.6 0.4 0.95/d' -e '/^canopy = 0.75/d' "$SRC/rack3.ppfd" > "$WORK/rack3leak.ppfd"
 run rack3leak.ppfd

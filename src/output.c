@@ -95,12 +95,12 @@ void output_log(ppfd_t *p)
 		const cslab_t *c = &p->slab[ie];
 		if (c->full) {
 			plog(p, "canopy       : z = %g..%g m, LAI = %g, G = %g, leaf = %s\n",
-				c->zbot, c->ztop, c->lai, c->k0, p->mat[p->canopy.imat].name);
+				c->zbot, c->ztop, c->lai, c->k0, p->mat[c->imat].name);
 		}
 		else {
 			plog(p, "canopy       : z = %g..%g m, x = %g..%g, y = %g..%g, LAI = %g, G = %g, leaf = %s\n",
 				c->zbot, c->ztop, c->x0, c->x1, c->y0, c->y1, c->lai, c->k0,
-				p->mat[p->canopy.imat].name);
+				p->mat[c->imat].name);
 		}
 	}
 	for (ie = 0; ie < p->ndist; ie++) {

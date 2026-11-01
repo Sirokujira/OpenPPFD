@@ -253,6 +253,17 @@ int canopy_selftest(void)
 }
 
 /* 葉の散乱係数 ω = ρ + τ (クランプはここ 1 箇所に集約する) */
+/* スラブ js の葉の散乱係数 (段ごとに葉材料が違うとき。散乱モデルのみ) */
+double canopy_omega_slab(const ppfd_t *p, int js, int il)
+{
+	const pmat_t *m = &p->mat[p->slab[js].imat];
+	double omega = m->rho[il] + m->tau[il];
+
+	if (omega < 0.0) omega = 0.0;
+	if (omega > 1.0) omega = 1.0;
+	return omega;
+}
+
 double canopy_omega(const ppfd_t *p, int il)
 {
 	const pmat_t *m = &p->mat[p->canopy.imat];
@@ -867,7 +878,6 @@ void canopy_field(ppfd_t *p, int il, const double *B, double *aout, double *sout
 {
 	const canopy_t *c = &p->canopy;
 	const int nl = c->nlayer;
-	const double omega = canopy_omega(p, il);
 	double *Q = (double *)xcalloc((size_t)nl, sizeof(double));
 	double *eprev = (double *)xcalloc((size_t)(2 * p->nslab), sizeof(double));
 	double  atot = 0.0, stot = 0.0;
@@ -881,6 +891,7 @@ void canopy_field(ppfd_t *p, int il, const double *B, double *aout, double *sout
 
 	/* スラブごとに 1 本のカラム。隣のスラブとは向かい合う面どうしでつながる */
 	for (js = 0; js < p->nslab; js++) {
+		const double omega = canopy_omega_slab(p, js, il);     /* 段ごとの葉 */
 		double *fdn = &p->cfdn[(((size_t)js * p->nlam) + il) * (nl + 1)];
 		double *fup = &p->cfup[(((size_t)js * p->nlam) + il) * (nl + 1)];
 		double  etop = 0.0, ebot = 0.0, adiff = 0.0, dsum = 0.0;
