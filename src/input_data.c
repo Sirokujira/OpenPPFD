@@ -1220,28 +1220,17 @@ int input_data(FILE *fp, ppfd_t *p)
 				}
 			}
 		}
-		if (spec && p->canopy.on) {
-			/*
-			側壁 (x/y 面) の鏡映は z を保つので群落スラブは鏡映で不変。
-			床・天井の鏡映はスラブを動かすが、鏡像への直線の z を周期 2Lz の
-			三角波で折り返せば実経路の z プロファイルが厳密に得られるので、
-			canopy_path (geometry.c) がその折り返しで経路長を測る。どちらも
-			弧長は鏡映で保たれるため、群落減衰は鏡像への直線のまま厳密。
-			散乱の還流は、側壁の鏡面なら展開した直線のまま層へ預けられる。
-			*/
-			if (p->canopy.scatter && ((p->mat[p->wallmat[4]].rhos > 0.0) ||
-			                          (p->mat[p->wallmat[5]].rhos > 0.0))) {
-				/*
-				側壁の鏡面は z を保つので、鏡像への直線のまま層へ預けられる
-				(canopy_setup)。床・天井の鏡面は経路を z で折り返し、層を通る
-				順序が入れ替わる (下りの後に上り) ので、預け入れの順序を経路に
-				沿って組み直す必要があり未対応。
-				*/
-				fprintf(stderr, "*** a specular floor/ceiling cannot be combined with leafscatter yet\n");
-				fprintf(stderr, "    (specular side walls can)\n");
-				return 1;
-			}
-		}
+		/*
+		鏡面と群落の併用 (入力段で弾くものは無い) :
+		側壁 (x/y 面) の鏡映は z を保つので群落スラブは鏡映で不変。
+		床・天井の鏡映はスラブを動かすが、鏡像への直線の z を周期 2Lz の
+		三角波で折り返せば実経路の z プロファイルが厳密に得られるので、
+		canopy_path (geometry.c) がその折り返しで経路長を測る。どちらも
+		弧長は鏡映で保たれるため、群落減衰は鏡像への直線のまま厳密。
+		散乱の還流 (leafscatter) も同じ展開した直線で、経路に沿った順に層へ
+		預ける (canopy_deposit)。群落の面から出た光が床・天井の鏡面で同じ面へ
+		戻る分は二流の境界の反射率になる (canopy_setup の crtop / crbot)。
+		*/
 	}
 
 	return 0;

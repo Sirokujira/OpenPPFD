@@ -1,0 +1,31 @@
+# 検証 (x) mirror9.ppfd の参照解 : z で鏡映して 2 倍にした幾何。
+# 実チャンバは z 1..2、鏡映した複製は z 0..1 (下面は天井の鏡像なので灰)。
+# 群落は鏡映面 (z = 1) をはさんで 1 枚につながる (z 0.7..1.3、LAI 3.0、
+# 16 層)。光源の鏡像 (z = 0.2) を実光源として置く。黒い側壁の分割は
+# 実チャンバの 8 x 8 (1 m x 1 m) と同じ密度に面ごとの div でそろえる。
+
+OpenPPFD 1 0
+title = reference for mirror9 (doubled in z)
+wavelength = 380 780 5
+chamber    = 1.0 1.0 2.0
+patchdiv   = 8 8
+material = black  gray 0.0
+material = ceil   gray 0.5
+material = leaf   gray 0.25 0.25
+wall = all  black
+wall = xmin black div 8 16
+wall = xmax black div 16 8
+wall = ymin black div 16 8
+wall = ymax black div 8 16
+wall = zmin ceil
+wall = zmax ceil
+spectrum = na555 mono 555
+led = 0.4 0.5 1.8 1.0 na555 iso
+led = 0.4 0.5 0.2 1.0 na555 iso
+canopy = 1.3 0.7 3.0 0.5 leaf
+leafscatter = on
+leaflayers  = 16
+target = above 1.5 6 6
+target = mid   1.15 6 6
+photoperiod = 16
+end

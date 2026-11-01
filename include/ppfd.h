@@ -261,6 +261,7 @@ typedef struct {
 	double    carea;                /* 群落の水平断面積 [m²] */
 	double   *cnorm_up, *cnorm_dn;  /* [nslab] 正規化前の Σ A_i F_i / A_c (1 が理想) */
 	int       cnl;                  /* 層の通し数 = nslab * nlayer (散乱モデルのとき) */
+	double   *crtop, *crbot;        /* [nslab] 面から出た放射が鏡面の天井 / 床で同じ面へ戻る割合 */
 	int       cnburied;             /* 群落の高さ範囲に埋没したパッチ数 */
 	double    cscat_out;            /* 群落が返した放射束 [W] (診断) */
 
@@ -344,6 +345,7 @@ void    setup_patch(ppfd_t *);
 void    setup_target(ppfd_t *);
 double  canopy_path(const ppfd_t *, vec3_t, vec3_t);
 int     canopy_may_cross(const ppfd_t *, double, double);
+double  fold_z(const ppfd_t *, double);
 void    canopy_trans(const ppfd_t *, double, double *);
 int     occ_blocked(const ppfd_t *, vec3_t, vec3_t);
 int     occ_any(const ppfd_t *);

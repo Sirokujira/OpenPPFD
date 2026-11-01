@@ -1,0 +1,51 @@
+# 検証 (x) 床の鏡面 + leafscatter (群落が鏡面の床に乗る)
+#
+# 完全鏡面 (rho_s = 1) の床に散乱葉の群落 z 0..0.3 (LAI 1.5、G 0.5) を
+# 置き、天井を灰 (0.5)、側壁を黒にして leafscatter = on にする。光源は
+# (0.4, 0.5, 0.8) の等方点光源。
+#
+# ■ 床・天井の鏡面と二流のカラム
+# 床・天井の鏡映は経路を z で折り返し、層を通る順序を入れ替える (下りの後に
+# 上り)。光源・パッチからの光線は、展開した直線を z = k Lz で区切って区間
+# ごとに実チャンバへ戻し、経路に沿った順に層へ預ける (canopy_deposit)。
+# 群落の面から出た散乱光のうち、床・天井の鏡面で折り返してそのまま同じ面へ
+# 戻る割合は、二流の境界の反射率 (crbot / crtop) としてカラムに入れる。
+# 面が鏡面の壁に乗っているなら戻る割合は rho_s そのもの。
+#
+# ■ 二重箱等価 (mirror9ref.ppfd と比較)
+# 鏡面の床に乗った群落は「z で鏡映して 2 倍にした幾何」と厳密に等価 :
+#   - チャンバを 1 x 1 x 2、実チャンバを z 1..2 に置き、光源の鏡像を
+#     z = 0.2 に実光源として置く。下面 (z = 0) は天井の鏡像なので灰
+#   - 群落は z 0.7..1.3 の 1 枚 (厚さも LAI も 2 倍、層数も 2 倍の 16 で
+#     層の厚さをそろえる)
+#   - 黒い側壁の分割を面ごとの div でそろえる
+# 二流近似では、完全反射の境界は鏡映した対称なカラムの中央面と等価
+# (上下の流束が等しい)。測定面 2 枚 (群落の上・内部) の分布がビット一致し、
+# 群落の吸収は参照解のちょうど半分になる。
+#
+# この等価は二流のカラムの解き方 (adding sweep) の誤りを見つけた : 対称な
+# 湧き出しで上下の流出が割れていた (Sb に余分な (1 + R Rb))。吸収を残差で
+# 数えるので収支の判定には出ない。いまは --selftest でも縛っている。
+
+OpenPPFD 1 0
+title = canopy on a specular floor + leafscatter
+wavelength = 380 780 5
+chamber    = 1.0 1.0 1.0
+patchdiv   = 8 8
+material = black  gray 0.0
+material = ceil   gray 0.5
+material = mirror gray 0.0 specular 1.0
+material = leaf   gray 0.25 0.25
+wall = all  black
+wall = zmin mirror
+wall = zmax ceil
+spectrum = na555 mono 555
+led = 0.4 0.5 0.8 1.0 na555 iso
+canopy = 0.3 0.0 1.5 0.5 leaf
+leafscatter = on
+leaflayers  = 8
+target = above 0.5 6 6
+target = mid   0.15 6 6
+photoperiod = 16
+specbounce  = 1
+end

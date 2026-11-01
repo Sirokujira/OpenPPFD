@@ -410,13 +410,10 @@ awk -v m="$M4AVG" -v o="$(sumval 5)" 'BEGIN {
 	exit (m > o) ? 0 : 1
 }' || status=1
 # 散乱の還流だけは鏡像経路ぶんの層への預け入れが要るので、まだ弾かれる
+# 鏡面の天井 + leafscatter (検証 (x))。群落の上面が鏡面の天井に乗る配置で収支が閉じる
 sed 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/mirror4.ppfd" > "$WORK/mirror4ls.ppfd"
-if (cd "$WORK" && "$OPPFD" mirror4ls.ppfd > /dev/null 2>&1); then
-	echo "speccan-z: +leafscatter rejected -> NG (accepted invalid combo)" >&2
-	status=1
-else
-	echo "speccan-z: +leafscatter rejected -> OK"
-fi
+run mirror4ls.ppfd
+chkabs "speccan-z: +leafscatter closure" "$(logval 'closure error')" 1e-6
 
 echo
 echo "== (o) stacked canopy slabs (multi-tier racks) =="
@@ -753,14 +750,6 @@ sed -e 's/^material = mirror gray 0.0 specular 1.0/material = mirror gray 0.05 s
     -e 's/^wall = all  black/wall = all  white/' "$SRC/mirror8.ppfd" > "$WORK/mirror8p.ppfd"
 run mirror8p.ppfd
 chkabs "specscat: partial mirror closure" "$(logval 'closure error')" 1e-5
-# 床・天井の鏡面は層を通る順序を折り返すので、leafscatter との併用は弾く
-sed 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/mirror4.ppfd" > "$WORK/mirror4ls2.ppfd"
-if (cd "$WORK" && "$OPPFD" mirror4ls2.ppfd > /dev/null 2>&1); then
-	echo "specscat: z-mirror rejected -> NG (accepted invalid combo)" >&2
-	status=1
-else
-	echo "specscat: z-mirror rejected -> OK"
-fi
 
 echo "== (w) multi-tier racks with leafscatter (one two-stream column per tier) =="
 # rack3.ppfd : 断面いっぱいの棚板で仕切った 2 段、各段に光源と散乱葉の群落。
@@ -805,6 +794,27 @@ else
 	status=1
 fi
 chkabs "specbounce: deep closure" "$(logval 'closure error')" 3e-3
+
+echo "== (x) specular floor/ceiling + leafscatter (folded deposits, mirror boundary) =="
+# mirror9.ppfd : 完全鏡面の床に乗った群落 = z で鏡映して 2 倍にした幾何
+# (群落は鏡映面をはさんで 1 枚、光源の鏡像を実光源として置く)
+run mirror9.ppfd
+chkabs "zscat: closure" "$(logval 'closure error')" 1e-6
+m9c=$(logval 'absorbed by canopy')
+for t in above mid; do cp "$WORK/ppfd_map_$t.csv" "$WORK/map_m9$t.csv"; done
+run mirror9ref.ppfd
+chkabs "zscat: equiv. above canopy" "$(maxdiff map_m9above.csv ppfd_map_above.csv)" 1e-6
+chkabs "zscat: equiv. in canopy"    "$(maxdiff map_m9mid.csv ppfd_map_mid.csv)" 1e-6
+chk "zscat: canopy absorption" "$m9c" "$(awk -v a="$(logval 'absorbed by canopy')" 'BEGIN {printf "%.9g", a / 2}')" 1e-5
+# 床と天井の両方が部分的な鏡面 (rho_d 0.05 + rho_s 0.9) で、群落と鏡面の間に
+# すき間がある : 鏡像の連鎖は無限に続くので打ち切りが収支に出るが、段数を
+# 上げると 0 へ収束する (4 段 -6.8e-3、16 段 -1.2e-4、32 段 -2.8e-6)
+sed -e 's/^material = mirror gray 0.0 specular 1.0/material = mirror gray 0.05 specular 0.9/' \
+    -e 's/^wall = all  black/wall = all  white/' -e 's/^wall = xmax mirror/wall = xmax white/' \
+    -e 's/^wall = ymax mirror/wall = ymax white\nwall = zmax mirror\nwall = zmin mirror/' \
+    -e 's/^specbounce .*/specbounce = 16/' "$SRC/mirror8.ppfd" > "$WORK/mirror8z.ppfd"
+run mirror8z.ppfd
+chkabs "zscat: two z-mirrors, 16 orders" "$(logval 'closure error')" 2e-4
 
 echo
 if [ "$status" -ne 0 ]; then

@@ -81,9 +81,14 @@ static void gather_target(ppfd_t *p)
 						c0[2] = v_make(p->Lx, p->Ly, zc); c0[3] = v_make(0.0, p->Ly, zc);
 						f = canopy_plane_ff_point(p, x, nz, c0, NULL);
 						for (i2 = 0; i2 < nstr; i2++) {
-							/* 側壁の鏡面で折り返して見える面 (面の鏡像) */
+							/*
+							鏡面で折り返して見える面 (面の鏡像)。上面は天井で 1 回
+							(n2 = +1)、下面は床で 1 回 (n2 = -1) まで : それより先の
+							経路は自分の面を通って群落へ戻る (canopy_setup と同じ)
+							*/
 							vec3_t c4[4];
 							int    v;
+							if ((str[i2].n[2] != 0) && (str[i2].n[2] != (istop ? 1 : -1))) continue;
 							for (v = 0; v < 4; v++) c4[v] = spec_apply(p, &str[i2], c0[v]);
 							f += str[i2].w * canopy_plane_ff_point(p, x, nz, c4, str[i2].n);
 						}

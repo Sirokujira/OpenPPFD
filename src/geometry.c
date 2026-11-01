@@ -430,7 +430,7 @@ void setup_target(ppfd_t *p)
 で与えられる (床・天井で何回反射しても成り立つ)。両端が箱の内側にある
 実在の線分では恒等写像になるため、鏡面が無い入力の結果は変わらない。
 */
-static double fold_z(const ppfd_t *p, double z)
+double fold_z(const ppfd_t *p, double z)
 {
 	const double period = 2.0 * p->Lz;
 	double w;
