@@ -72,8 +72,12 @@ static void gather_target(ppfd_t *p)
 					const double *bt = &p->cbtop[(size_t)js * nl];
 					const double *bb = &p->cbbot[(size_t)js * nl];
 					vec3_t c0[4];
+					/* 隣のスラブより向こうからは、このスラブの面は見えない */
+					if ((js > 0) && (x.z >= p->slab[js - 1].zbot)) continue;
+					if ((js + 1 < p->nslab) && (x.z <= p->slab[js + 1].ztop)) continue;
 					if ((x.z >= sl->ztop) || (x.z <= sl->zbot)) {
 						const int istop = (x.z >= sl->ztop);
+						const int outer = istop ? (js == 0) : (js + 1 == p->nslab);
 						const double zc = istop ? sl->ztop : sl->zbot;
 						const double *bf = istop ? bt : bb;
 						double f;
@@ -88,7 +92,7 @@ static void gather_target(ppfd_t *p)
 							*/
 							vec3_t c4[4];
 							int    v;
-							if ((str[i2].n[2] != 0) && (str[i2].n[2] != (istop ? 1 : -1))) continue;
+							if ((str[i2].n[2] != 0) && (!outer || (str[i2].n[2] != (istop ? 1 : -1)))) continue;
 							for (v = 0; v < 4; v++) c4[v] = spec_apply(p, &str[i2], c0[v]);
 							f += str[i2].w * canopy_plane_ff_point(p, x, nz, c4, str[i2].n);
 						}

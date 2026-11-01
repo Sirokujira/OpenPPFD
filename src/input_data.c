@@ -1168,32 +1168,10 @@ int input_data(FILE *fp, ppfd_t *p)
 				}
 			}
 			/*
-			段ごとのスラブはそれぞれ独立な 1 本のカラムとして解く。そのために
-			隣り合う段の間に「断面いっぱいの棚板」を要求する : 棚板があれば、
-			ある段の上下面から出た散乱光が別の段の群落を通ることも、別の段の
-			面に直接届くこともない (届く先は形態係数の可視率で 0 になる)。
-			棚板が無いと、面から出た光が別のスラブを通る経路の預け入れが
-			要るので弾く。
+			段ごとのスラブはそれぞれ 1 本のカラムとして解き、隣り合うスラブとは
+			向かい合う面どうしで拡散光をやりとりする (canopy_setup の cxup /
+			cxdn)。棚板で仕切られていればそのやりとりは可視率で 0 になる。
 			*/
-			for (j = 0; j + 1 < p->nslab; j++) {
-				const double zlo = p->slab[j + 1].ztop, zhi = p->slab[j].zbot;
-				int io, shelf = 0;
-				for (io = 0; io < p->nocc; io++) {
-					const occluder_t *o = &p->occ[io];
-					if ((o->x0 <= EPS) && (o->x1 >= p->Lx - EPS)
-					 && (o->y0 <= EPS) && (o->y1 >= p->Ly - EPS)
-					 && (o->z0 >= zlo - EPS) && (o->z1 <= zhi + EPS)) {
-						shelf = 1;
-						break;
-					}
-				}
-				if (!shelf) {
-					fprintf(stderr, "*** leafscatter with several canopy slabs needs a shelf (occluder) "
-						"covering the whole cross-section between z = %g and %g\n", zlo, zhi);
-					fprintf(stderr, "    (each tier is solved as its own two-stream column)\n");
-					return 1;
-				}
-			}
 		}
 	}
 

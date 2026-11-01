@@ -23,6 +23,7 @@ void solve_radiosity(ppfd_t *p)
 	double  *M = NULL;
 	double  *Bold, *Bnew;
 	double  *Bfull = NULL;
+	double  *ctmp = NULL;                   /* [2*nslab] 前の反復の面の流束 (収束判定) */
 	const int scat = p->canopy.on && p->canopy.scatter;
 	int      il;
 	int      itermax = 0;
@@ -38,6 +39,7 @@ void solve_radiosity(ppfd_t *p)
 	Bold = (double *)xcalloc((size_t)n, sizeof(double));
 	Bnew = (double *)xcalloc((size_t)n, sizeof(double));
 	if (scat) Bfull = (double *)xcalloc((size_t)n * nl, sizeof(double));
+	if (scat) ctmp = (double *)xcalloc((size_t)(2 * p->nslab), sizeof(double));
 
 	for (il = 0; il < nl; il++) {
 		const double *F;
@@ -108,14 +110,31 @@ void solve_radiosity(ppfd_t *p)
 		}
 
 		for (iter = 0; iter < p->maxiter; iter++) {
-			double dmax = 0.0, bmax = 0.0;
+			double dmax = 0.0, bmax = 0.0, cdmax = 0.0, cmax = 0.0;
 			if (scat) {
 				/*
 				群落の拡散場を現在の B から解き直す。反復行列の一部として
 				扱うので、収束すれば直接光・壁・群落が同時に整合する。
+				スラブが複数あると、向かい合う面どうしのやりとりも反復で
+				整合させるので、面の流束の変化も収束判定に入れる (壁が全部
+				黒くて B が 0 でも、スラブどうしのやりとりは反復が要る)。
 				*/
 				double aw = 0.0, sw = 0.0;
+				int    js;
+				for (js = 0; (p->nslab > 1) && (js < p->nslab); js++) {
+					ctmp[2 * js]       = p->cbtop[((size_t)js * nl) + il];
+					ctmp[(2 * js) + 1] = p->cbbot[((size_t)js * nl) + il];
+				}
 				canopy_field(p, il, Bfull, &aw, &sw);
+				for (js = 0; (p->nslab > 1) && (js < p->nslab); js++) {
+					const double et = p->cbtop[((size_t)js * nl) + il];
+					const double eb = p->cbbot[((size_t)js * nl) + il];
+					const double d1 = fabs(et - ctmp[2 * js]), d2 = fabs(eb - ctmp[(2 * js) + 1]);
+					if (d1 > cdmax) cdmax = d1;
+					if (d2 > cdmax) cdmax = d2;
+					if (et > cmax) cmax = et;
+					if (eb > cmax) cmax = eb;
+				}
 			}
 
 #ifdef _OPENMP
@@ -148,6 +167,17 @@ void solve_radiosity(ppfd_t *p)
 			}
 
 			if (iter + 1 > itermax) itermax = iter + 1;
+			if (scat && (p->nslab > 1)) {
+				const double rb = (bmax > 0.0) ? (dmax / bmax) : 0.0;
+				const double rc = (cmax > 0.0) ? (cdmax / cmax) : 0.0;
+				const double r = (rb > rc) ? rb : rc;
+				if ((bmax <= 0.0) && (cmax <= 0.0)) break;
+				if ((r < p->converg) || (iter == p->maxiter - 1)) {
+					if (r > residmax) residmax = r;
+					break;
+				}
+				continue;
+			}
 			if (bmax <= 0.0) break;
 			if ((dmax / bmax) < p->converg) {
 				if ((dmax / bmax) > residmax) residmax = dmax / bmax;
@@ -194,5 +224,6 @@ void solve_radiosity(ppfd_t *p)
 	free(Bold);
 	free(Bnew);
 	if (Bfull != NULL) free(Bfull);
+	if (ctmp != NULL) free(ctmp);
 	if (M != NULL) free(M);
 }

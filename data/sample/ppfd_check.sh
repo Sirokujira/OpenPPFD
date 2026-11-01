@@ -461,14 +461,11 @@ if (cd "$WORK" && "$OPPFD" canopy2mat.ppfd > /dev/null 2>&1); then
 else
 	echo "stacked: mixed leaf rejected -> OK"
 fi
-# 段を仕切る棚板が無い複数スラブは、面から出た散乱光が別のスラブを通るので弾かれる (検証 (w))
+# 棚板の無い複数スラブ + leafscatter : 向かい合う面どうしで拡散光をやりとりする (検証 (y))。
+# 黒い壁でも反射の反復が回る (スラブどうしのやりとりを収束判定に入れてある)
 sed 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/canopy2.ppfd" > "$WORK/canopy2ls.ppfd"
-if (cd "$WORK" && "$OPPFD" canopy2ls.ppfd > /dev/null 2>&1); then
-	echo "stacked: +leafscatter rejected -> NG (accepted invalid combo)" >&2
-	status=1
-else
-	echo "stacked: +leafscatter rejected -> OK"
-fi
+run canopy2ls.ppfd
+chkabs "stacked: +leafscatter closure" "$(logval 'closure error')" 1e-6
 
 echo
 echo "== (p) two specular faces (commuting mirrors) =="
@@ -775,14 +772,10 @@ chk "tiers: wall abs = sum"   "$r3w" "$(awk -v a="$raw" -v b="$rbw" 'BEGIN {prin
 sed -e '/^led = 0.6 0.4 0.95/d' -e '/^canopy = 0.75/d' "$SRC/rack3.ppfd" > "$WORK/rack3leak.ppfd"
 run rack3leak.ppfd
 chkabs "tiers: no leak above shelf" "$(sumrow b_top 5)" 0
-# 段を仕切る棚板が無いと、面から出た散乱光が別の段を通るので弾く
+# 棚板を外すと 2 段は向かい合う面どうしでやりとりする (検証 (y))。収支が閉じること
 sed '/^occluder = shelf/d' "$SRC/rack3.ppfd" > "$WORK/rack3open.ppfd"
-if (cd "$WORK" && "$OPPFD" rack3open.ppfd > /dev/null 2>&1); then
-	echo "tiers: no shelf rejected -> NG (accepted)" >&2
-	status=1
-else
-	echo "tiers: no shelf rejected -> OK"
-fi
+run rack3open.ppfd
+chkabs "tiers: no shelf closure" "$(logval 'closure error')" 2e-4
 # specbounce の上限は変換の数で決まる : 鏡面 4 面 (2 軸) なら 14 段まで入り、
 # 打ち切りの収支誤差が 6 段の -1.4% から下がる。上限を超えた要求はログに出して下げる
 sed -e '/^canopy/d' -e 's/^specbounce .*/specbounce  = 20/' "$SRC/difftrans.ppfd" > "$WORK/specdeep.ppfd"
@@ -815,6 +808,35 @@ sed -e 's/^material = mirror gray 0.0 specular 1.0/material = mirror gray 0.05 s
     -e 's/^specbounce .*/specbounce = 16/' "$SRC/mirror8.ppfd" > "$WORK/mirror8z.ppfd"
 run mirror8z.ppfd
 chkabs "zscat: two z-mirrors, 16 orders" "$(logval 'closure error')" 2e-4
+
+echo "== (y) facing canopy slabs without a shelf (slab-to-slab diffuse exchange) =="
+# 1 枚の群落を接する 2 枚に割っても結果が変わらない : 接した面どうしは
+# 拡散光を全部やりとりし (cx = 1)、二流の adding と同じ解に収束する。
+# rack.ppfd (白壁) の群落を 16 層 1 枚 / 8 層 x 2 枚 (層の厚さは同じ) で比べる
+sed -e 's/^photoperiod/leafscatter = on\nleaflayers = 16\nphotoperiod/' \
+    -e 's/^target = canopybase 0.06 25 13/target = canopybase 0.06 25 13\ntarget = upper 0.2 25 13/' \
+	"$SRC/rack.ppfd" > "$WORK/rack_one.ppfd"
+run rack_one.ppfd
+for t in canopytop canopybase upper; do cp "$WORK/ppfd_map_$t.csv" "$WORK/map_one$t.csv"; done
+r1c=$(logval 'absorbed by canopy')
+sed -e 's/^canopy = 0.25 0.05 3.0 0.5 leaf/canopy = 0.25 0.15 1.5 0.5 leaf\ncanopy = 0.15 0.05 1.5 0.5 leaf/' \
+    -e 's/^leaflayers = 16/leaflayers = 8/' "$WORK/rack_one.ppfd" > "$WORK/rack_two.ppfd"
+run rack_two.ppfd
+chkabs "facing: split == single (top)"   "$(maxdiff map_onecanopytop.csv ppfd_map_canopytop.csv)" 1e-6
+chkabs "facing: split == single (upper)" "$(maxdiff map_oneupper.csv ppfd_map_upper.csv)" 1e-6
+chkabs "facing: split == single (base)"  "$(maxdiff map_onecanopybase.csv ppfd_map_canopybase.csv)" 1e-6
+chk "facing: split canopy abs" "$(logval 'absorbed by canopy')" "$r1c" 1e-6
+# mirror10.ppfd : 鏡面の天井と群落の間にすき間 = z で 2 倍にした幾何
+# (群落と鏡像の 2 枚が棚板なしで向かい合う)
+run mirror10.ppfd
+chkabs "facing: ceiling-gap closure" "$(logval 'closure error')" 1e-6
+m10c=$(logval 'absorbed by canopy')
+for t in above mid below; do cp "$WORK/ppfd_map_$t.csv" "$WORK/map_m10$t.csv"; done
+run mirror10ref.ppfd
+chkabs "facing: equiv. above canopy" "$(maxdiff map_m10above.csv ppfd_map_above.csv)" 1e-6
+chkabs "facing: equiv. in canopy"    "$(maxdiff map_m10mid.csv ppfd_map_mid.csv)" 1e-6
+chkabs "facing: equiv. below canopy" "$(maxdiff map_m10below.csv ppfd_map_below.csv)" 1e-6
+chk "facing: canopy absorption" "$m10c" "$(awk -v a="$(logval 'absorbed by canopy')" 'BEGIN {printf "%.9g", a / 2}')" 1e-5
 
 echo
 if [ "$status" -ne 0 ]; then

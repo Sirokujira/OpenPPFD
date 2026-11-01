@@ -262,6 +262,7 @@ typedef struct {
 	double   *cnorm_up, *cnorm_dn;  /* [nslab] 正規化前の Σ A_i F_i / A_c (1 が理想) */
 	int       cnl;                  /* 層の通し数 = nslab * nlayer (散乱モデルのとき) */
 	double   *crtop, *crbot;        /* [nslab] 面から出た放射が鏡面の天井 / 床で同じ面へ戻る割合 */
+	double   *cxup, *cxdn;          /* [nslab] 上面 / 下面から出た放射が隣のスラブの面へ届く割合 */
 	int       cnburied;             /* 群落の高さ範囲に埋没したパッチ数 */
 	double    cscat_out;            /* 群落が返した放射束 [W] (診断) */
 
@@ -337,7 +338,7 @@ double  canopy_interior(const ppfd_t *, int, int, double, double);
 double  canopy_deposit(const ppfd_t *, vec3_t, vec3_t, double, double *, double *);
 double  plen_trans(const float *, double);
 double  canopy_plane_ff_point(const ppfd_t *, vec3_t, vec3_t, const vec3_t *, const int *);
-void    canopy_column(const ppfd_t *, int, double, const double *,
+void    canopy_column(const ppfd_t *, int, double, const double *, double, double,
                       double *, double *, double *, double *, double *);
 
 /* geometry.c */
