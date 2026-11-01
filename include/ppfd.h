@@ -194,6 +194,7 @@ typedef struct {
 	int     imat;                   /* 葉材料 (段ごとに違ってよいのは leafscatter = on のとき) */
 	double  x0, x1, y0, y1;         /* 水平範囲 (栽培ベッドの上だけの群落)。省略時は断面全体 */
 	int     full;                   /* 1 : 断面全体を覆う (従来のスラブと同じ経路で計算) */
+	int     tier;                   /* 段の番号 (同じ高さ範囲に並ぶベッドは同じ段。上から 0) */
 } cslab_t;
 
 /* ---- 群落 (Beer-Lambert 減衰スラブ + 衝突源二流散乱) ----------------
@@ -277,6 +278,8 @@ typedef struct {
 	int       cnl;                  /* 層の通し数 = nslab * nlayer (散乱モデルのとき) */
 	double   *crtop, *crbot;        /* [nslab] 面から出た放射が鏡面の天井 / 床で同じ面へ戻る割合 */
 	double   *cxup, *cxdn;          /* [nslab] 上面 / 下面から出た放射が隣のスラブの面へ届く割合 */
+	int      *cnup, *cndn;          /* [nslab] 面どうしでやりとりする上 / 下のスラブ (無ければ -1) */
+	int       cbeds;                /* 散乱モデルに栽培ベッド (範囲を限った / 並んだスラブ) がある */
 	int       cnburied;             /* 群落の高さ範囲に埋没したパッチ数 */
 	double    cscat_out;            /* 群落が返した放射束 [W] (診断) */
 
@@ -362,6 +365,8 @@ void    setup_target(ppfd_t *);
 double  canopy_path(const ppfd_t *, vec3_t, vec3_t);
 int     canopy_may_cross(const ppfd_t *, double, double);
 double  fold_z(const ppfd_t *, double);
+int     canopy_box_intervals(const ppfd_t *, double, double, double, double, double, double,
+                             vec3_t, vec3_t, double *, double *, int);
 void    canopy_trans(const ppfd_t *, double, double *);
 int     occ_blocked(const ppfd_t *, vec3_t, vec3_t);
 int     occ_any(const ppfd_t *);

@@ -1246,19 +1246,83 @@ int input_data(FILE *fp, ppfd_t *p)
 					((ref > 0.0) ? ((p->slab[j].k0 * p->slab[j].a) / ref) : 1.0);
 			}
 		}
-		if (p->canopy.scatter) {
+		/*
+		段 (tier) : 同じ高さ範囲に並ぶスラブ (栽培ベッド) を 1 段とする。
+		スラブは ztop の降順なので、同じ高さ範囲のものは並んでいる。
+		*/
+		{
+			int nt = 0;
 			for (j = 0; j < p->nslab; j++) {
-				if (!p->slab[j].full) {
-					fprintf(stderr, "*** leafscatter needs canopies covering the whole cross-section\n");
-					fprintf(stderr, "    (the two-stream field is horizontally uniform)\n");
-					return 1;
+				if ((j > 0) && (fabs(p->slab[j].ztop - p->slab[j - 1].ztop) <= EPS)
+				 && (fabs(p->slab[j].zbot - p->slab[j - 1].zbot) <= EPS)) {
+					p->slab[j].tier = p->slab[j - 1].tier;
+				}
+				else {
+					p->slab[j].tier = nt++;
 				}
 			}
+		}
+		if (p->canopy.scatter) {
 			/*
-			段ごとのスラブはそれぞれ 1 本のカラムとして解き、隣り合うスラブとは
-			向かい合う面どうしで拡散光をやりとりする (canopy_setup の cxup /
-			cxdn)。棚板で仕切られていればそのやりとりは可視率で 0 になる。
+			散乱モデルではスラブごとに 1 本のカラム (水平範囲 = 床面積) を解く。
+			段ごとに断面全体のスラブなら、隣り合う段と向かい合う面どうしで
+			拡散光をやりとりする (canopy_setup の cxup / cxdn)。栽培ベッドの段
+			(範囲を限ったスラブ、または同じ高さに並ぶ複数のスラブ) は :
+			  - ベッドの側面からの横方向の出入りは表現しない (上下の面だけ。
+			    断面全体のスラブの埋没パッチと同じ近似で、収支は閉じる)
+			  - 隣の段との間に断面いっぱいの棚板を要求する (ベッドの面から出た
+			    光が通路を抜けて別の段のベッドを通る経路を運べないため)
+			  - 床・天井の鏡面とは併用させず、床・天井にも接しない (面の鏡像が
+			    別のベッドの面へ戻る経路、面が壁に乗る場合の受け渡しを持たない)
 			*/
+			const int zmir = (p->mat[p->wallmat[4]].rhos > 0.0) || (p->mat[p->wallmat[5]].rhos > 0.0);
+			const double tol = 1e-9 * p->Lz;
+			for (j = 0; j < p->nslab; j++) {
+				int bedtier = !p->slab[j].full;
+				for (k = 0; k < p->nslab; k++) {
+					if ((k != j) && (p->slab[k].tier == p->slab[j].tier)) bedtier = 1;
+				}
+				/* 段どうしの高さ範囲は重ならない (並んだベッドは同じ範囲) */
+				for (k = 0; k < p->nslab; k++) {
+					if ((p->slab[k].tier != p->slab[j].tier)
+					 && (p->slab[k].zbot < p->slab[j].ztop - EPS) && (p->slab[j].zbot < p->slab[k].ztop - EPS)) {
+						fprintf(stderr, "*** leafscatter : canopy beds side by side must share one height range "
+							"(z = %g..%g and %g..%g)\n", p->slab[j].zbot, p->slab[j].ztop,
+							p->slab[k].zbot, p->slab[k].ztop);
+						return 1;
+					}
+				}
+				if (!bedtier) continue;
+				if (zmir) {
+					fprintf(stderr, "*** leafscatter : canopy beds cannot be combined with a specular floor/ceiling\n");
+					return 1;
+				}
+				if ((p->slab[j].zbot <= tol) || (p->slab[j].ztop >= p->Lz - tol)) {
+					fprintf(stderr, "*** leafscatter : canopy beds must not touch the floor/ceiling\n");
+					return 1;
+				}
+				/* 隣の段との間の棚板 */
+				for (k = 0; k < p->nslab; k++) {
+					double zlo, zhi;
+					int    io, shelf = 0;
+					if ((p->slab[k].tier != p->slab[j].tier + 1) && (p->slab[k].tier != p->slab[j].tier - 1)) continue;
+					zlo = (p->slab[k].tier > p->slab[j].tier) ? p->slab[k].ztop : p->slab[j].ztop;
+					zhi = (p->slab[k].tier > p->slab[j].tier) ? p->slab[j].zbot : p->slab[k].zbot;
+					for (io = 0; io < p->nocc; io++) {
+						const occluder_t *o = &p->occ[io];
+						if ((o->x0 <= EPS) && (o->x1 >= p->Lx - EPS) && (o->y0 <= EPS) && (o->y1 >= p->Ly - EPS)
+						 && (o->z0 >= zlo - EPS) && (o->z1 <= zhi + EPS)) {
+							shelf = 1;
+							break;
+						}
+					}
+					if (!shelf) {
+						fprintf(stderr, "*** leafscatter with canopy beds needs a shelf (occluder) covering the "
+							"whole cross-section between z = %g and %g\n", zlo, zhi);
+						return 1;
+					}
+				}
+			}
 		}
 	}
 

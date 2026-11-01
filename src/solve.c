@@ -72,17 +72,28 @@ static void gather_target(ppfd_t *p)
 					const double *bt = &p->cbtop[(size_t)js * nl];
 					const double *bb = &p->cbbot[(size_t)js * nl];
 					vec3_t c0[4];
-					/* 隣のスラブより向こうからは、このスラブの面は見えない */
-					if ((js > 0) && (x.z >= p->slab[js - 1].zbot)) continue;
-					if ((js + 1 < p->nslab) && (x.z <= p->slab[js + 1].ztop)) continue;
+					int hasup = 0, hasdn = 0, k;
+					/* 隣の段より向こうからは、このスラブの面は見えない */
+					for (k = 0; k < p->nslab; k++) {
+						if (p->slab[k].tier == sl->tier - 1) {
+							hasup = 1;
+							if (x.z >= p->slab[k].zbot) break;
+						}
+						if (p->slab[k].tier == sl->tier + 1) {
+							hasdn = 1;
+							if (x.z <= p->slab[k].ztop) break;
+						}
+					}
+					if (k < p->nslab) continue;
 					if ((x.z >= sl->ztop) || (x.z <= sl->zbot)) {
 						const int istop = (x.z >= sl->ztop);
-						const int outer = istop ? (js == 0) : (js + 1 == p->nslab);
+						const int outer = istop ? !hasup : !hasdn;
 						const double zc = istop ? sl->ztop : sl->zbot;
 						const double *bf = istop ? bt : bb;
 						double f;
-						c0[0] = v_make(0.0, 0.0, zc);     c0[1] = v_make(p->Lx, 0.0, zc);
-						c0[2] = v_make(p->Lx, p->Ly, zc); c0[3] = v_make(0.0, p->Ly, zc);
+						/* 面の矩形 (栽培ベッドならベッドの範囲。断面全体なら従来どおり) */
+						c0[0] = v_make(sl->x0, sl->y0, zc); c0[1] = v_make(sl->x1, sl->y0, zc);
+						c0[2] = v_make(sl->x1, sl->y1, zc); c0[3] = v_make(sl->x0, sl->y1, zc);
 						f = canopy_plane_ff_point(p, x, nz, c0, NULL);
 						for (i2 = 0; i2 < nstr; i2++) {
 							/*
@@ -98,7 +109,8 @@ static void gather_target(ppfd_t *p)
 						}
 						for (il = 0; il < nl; il++) E[il] += f * bf[il];
 					}
-					else {
+					else if ((x.x >= sl->x0) && (x.x <= sl->x1) && (x.y >= sl->y0) && (x.y <= sl->y1)) {
+						/* ベッドの内部 (通路にいる測定面はベッドの側面からの横の光を受けない) */
 						for (il = 0; il < nl; il++) E[il] += canopy_interior(p, js, il, x.z, nz.z);
 					}
 				}

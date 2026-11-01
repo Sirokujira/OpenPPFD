@@ -710,14 +710,12 @@ run mirror7.ppfd
 cp "$WORK/ppfd_map_s.csv" "$WORK/map_m7.csv"
 run mirror7ref.ppfd
 chkabs "bed: specular folded equiv." "$(maxdiff map_m7.csv ppfd_map_s.csv)" 1e-6
-# 重なったベッド・はみ出すベッド・leafscatter との併用は入力段で弾かれる
-for v in ov out ls; do
+# 重なったベッド・はみ出すベッドは入力段で弾かれる (leafscatter との併用は検証 (aa))
+for v in ov out; do
 	case $v in
 	ov)  sed 's/^canopy = .*/canopy = 0.8 0.4 2.0 0.5 blackleaf  0.3 0.7 0.3 0.7\ncanopy = 0.6 0.5 1.0 0.5 blackleaf  0.6 0.9 0.3 0.7/' \
 		"$SRC/canopybed.ppfd" > "$WORK/canopybed_$v.ppfd" ;;
 	out) sed 's/^canopy = .*/canopy = 0.8 0.4 2.0 0.5 blackleaf  0.3 1.2 0.3 0.7/' \
-		"$SRC/canopybed.ppfd" > "$WORK/canopybed_$v.ppfd" ;;
-	ls)  sed 's/^photoperiod/leafscatter = on\nphotoperiod/' \
 		"$SRC/canopybed.ppfd" > "$WORK/canopybed_$v.ppfd" ;;
 	esac
 	if (cd "$WORK" && "$OPPFD" "canopybed_$v.ppfd" > /dev/null 2>&1); then
@@ -903,6 +901,58 @@ for v in r0 out; do
 		status=1
 	else
 		echo "cylinder: invalid ($v) rejected -> OK"
+	fi
+done
+
+echo "== (aa) canopy beds with leafscatter (one two-stream column per bed) =="
+# bedscat.ppfd : 断面全体の 1 枚 = x = 0.5 で割った対称な 2 つのベッド
+run bedscat.ppfd
+bsc=$(logval 'absorbed by canopy'); bss=$(logval 'canopy scattered')
+for t in above mid below; do cp "$WORK/ppfd_map_$t.csv" "$WORK/map_bs$t.csv"; done
+sed 's/^canopy = 0.4 0.2 2.0 0.5 leaf/canopy = 0.4 0.2 2.0 0.5 leaf  0 0.5 0 1\ncanopy = 0.4 0.2 2.0 0.5 leaf  0.5 1 0 1/' \
+	"$SRC/bedscat.ppfd" > "$WORK/bedscat2.ppfd"
+run bedscat2.ppfd
+chkabs "bedscat: 2 beds == slab (above)" "$(maxdiff map_bsabove.csv ppfd_map_above.csv)" 1e-6
+chkabs "bedscat: 2 beds == slab (in)"    "$(maxdiff map_bsmid.csv ppfd_map_mid.csv)" 1e-6
+chkabs "bedscat: 2 beds == slab (below)" "$(maxdiff map_bsbelow.csv ppfd_map_below.csv)" 1e-6
+chk "bedscat: canopy absorption" "$(logval 'absorbed by canopy')" "$bsc" 1e-6
+chk "bedscat: scattered returned" "$(logval 'canopy scattered')" "$bss" 1e-6
+# 通路のある 1 つのベッド (非対称) でも収支が閉じる
+sed 's/^canopy = 0.4 0.2 2.0 0.5 leaf/canopy = 0.4 0.2 2.0 0.5 leaf  0.125 0.625 0.25 0.75/' \
+	"$SRC/bedscat.ppfd" > "$WORK/bedscat1.ppfd"
+run bedscat1.ppfd
+chkabs "bedscat: one bed closure" "$(logval 'closure error')" 1e-6
+# canopybed.ppfd (黒い壁のベッド) + leafscatter (以前は拒否)
+sed 's/^photoperiod/leafscatter = on\nphotoperiod/' "$SRC/canopybed.ppfd" > "$WORK/canopybedls.ppfd"
+run canopybedls.ppfd
+chkabs "bedscat: canopybed closure" "$(logval 'closure error')" 1e-6
+# mirror11.ppfd : 鏡面の側壁の隣のベッド = x 方向に 2 倍 (ベッドが 2 つ並ぶ)
+run mirror11.ppfd
+chkabs "bedscat: mirror closure" "$(logval 'closure error')" 1e-6
+m11c=$(logval 'absorbed by canopy')
+for t in above mid below; do cp "$WORK/ppfd_map_$t.csv" "$WORK/map_m11$t.csv"; done
+run mirror11ref.ppfd
+chkabs "bedscat: mirror equiv. (above)" "$(maxdiff map_m11above.csv ppfd_map_above.csv)" 1e-6
+chkabs "bedscat: mirror equiv. (in)"    "$(maxdiff map_m11mid.csv ppfd_map_mid.csv)" 1e-6
+chkabs "bedscat: mirror equiv. (below)" "$(maxdiff map_m11below.csv ppfd_map_below.csv)" 1e-6
+chk "bedscat: mirror canopy abs" "$m11c" "$(awk -v a="$(logval 'absorbed by canopy')" 'BEGIN {printf "%.9g", a / 2}')" 1e-5
+# 弾く組み合わせ : 床・天井の鏡面 / 床に接するベッド / 高さの違うベッドの並び /
+# 棚板なしで別の段にあるベッド
+for v in zmir floor height noshelf; do
+	case $v in
+	zmir)    sed 's/^wall = zmax white/wall = zmax mirror/' "$SRC/mirror11.ppfd" > "$WORK/bedls_$v.ppfd" ;;
+	floor)   sed 's/^canopy = 0.4 0.2 2.0 0.5 leaf  0.5 0.9 0.2 0.8/canopy = 0.4 0.0 2.0 0.5 leaf  0.5 0.9 0.2 0.8/' \
+	             "$SRC/mirror11.ppfd" > "$WORK/bedls_$v.ppfd" ;;
+	height)  sed 's/^canopy = 0.4 0.2 2.0 0.5 leaf  1.1 1.5 0.2 0.8/canopy = 0.45 0.25 2.0 0.5 leaf  1.1 1.5 0.2 0.8/' \
+	             "$SRC/mirror11ref.ppfd" > "$WORK/bedls_$v.ppfd" ;;
+	noshelf) sed 's/^canopy = 0.4 0.2 2.0 0.5 leaf  1.1 1.5 0.2 0.8/canopy = 0.9 0.7 2.0 0.5 leaf  1.1 1.5 0.2 0.8/' \
+	             "$SRC/mirror11ref.ppfd" > "$WORK/bedls_$v.ppfd" ;;
+	esac
+	if (cd "$WORK" && "$OPPFD" "bedls_$v.ppfd" > /dev/null 2>&1); then
+		echo "bedscat: invalid ($v) rejected -> NG (accepted)" >&2
+		status=1
+	else
+		echo "bedscat: invalid ($v) rejected -> OK"
 	fi
 done
 

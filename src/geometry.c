@@ -575,6 +575,72 @@ static double box_path(const ppfd_t *p, const cslab_t *c, vec3_t a, vec3_t b, ve
 	return sum;
 }
 
+/*
+線分 a + t (b - a) (t ∈ [0,1]) が軸並行の箱 [x0,x1]x[y0,y1]x[z0,z1] (と、
+鏡面の軸ではその複製) の中にある区間 [t0, t1] を列挙する (box_path と同じ
+複製の数え方)。範囲を限った群落 (栽培ベッド) の層ごとの預け入れを、光線に
+沿った順に並べるために使う。戻り値 = 区間の数 (maxn で打ち切り)。
+*/
+int canopy_box_intervals(const ppfd_t *p, double x0, double x1, double y0, double y1, double z0, double z1,
+                         vec3_t a, vec3_t b, double *t0, double *t1, int maxn)
+{
+	const double L[3] = { p->Lx, p->Ly, p->Lz };
+	const double ac[3] = { a.x, a.y, a.z };
+	const double bc[3] = { b.x, b.y, b.z };
+	const vec3_t d = v_sub(b, a);
+	const double len = v_norm(d);
+	int    klo[3], khi[3], i, k0, k1, k2, n = 0;
+
+	if (len <= 0.0) return 0;
+	for (i = 0; i < 3; i++) {
+		const int mir = (p->mat[p->wallmat[2 * i]].rhos > 0.0) ||
+		                (p->mat[p->wallmat[(2 * i) + 1]].rhos > 0.0);
+		if (mir && (L[i] > 0.0)) {
+			const int ka = (int)floor(ac[i] / L[i]);
+			const int kb = (int)floor(bc[i] / L[i]);
+			klo[i] = (ka < kb) ? ka : kb;
+			khi[i] = (ka < kb) ? kb : ka;
+		}
+		else {
+			klo[i] = 0;
+			khi[i] = 0;
+		}
+	}
+	for (k0 = klo[0]; k0 <= khi[0]; k0++) {
+		for (k1 = klo[1]; k1 <= khi[1]; k1++) {
+			for (k2 = klo[2]; k2 <= khi[2]; k2++) {
+				const vec3_t u = map_copy(p, v_make(x0, y0, z0), k0, k1, k2);
+				const vec3_t v = map_copy(p, v_make(x1, y1, z1), k0, k1, k2);
+				const double lo[3] = { (u.x < v.x) ? u.x : v.x, (u.y < v.y) ? u.y : v.y, (u.z < v.z) ? u.z : v.z };
+				const double hi[3] = { (u.x < v.x) ? v.x : u.x, (u.y < v.y) ? v.y : u.y, (u.z < v.z) ? v.z : u.z };
+				const double dc[3] = { d.x, d.y, d.z };
+				double ta = 0.0, tb = 1.0;
+				int    ok = 1;
+				for (i = 0; (i < 3) && ok; i++) {
+					if (fabs(dc[i]) < (EPS * (len + 1.0))) {
+						/* 軸に平行 : 半開区間 [lo, hi) (box_chord と同じ) */
+						if ((ac[i] < lo[i]) || (ac[i] >= hi[i])) ok = 0;
+					}
+					else {
+						double s0 = (lo[i] - ac[i]) / dc[i];
+						double s1 = (hi[i] - ac[i]) / dc[i];
+						if (s0 > s1) { const double t = s0; s0 = s1; s1 = t; }
+						if (s0 > ta) ta = s0;
+						if (s1 < tb) tb = s1;
+						if (tb <= ta) ok = 0;
+					}
+				}
+				if (ok && (n < maxn)) {
+					t0[n] = ta;
+					t1[n] = tb;
+					n++;
+				}
+			}
+		}
+	}
+	return n;
+}
+
 double canopy_path(const ppfd_t *p, vec3_t a, vec3_t b)
 {
 	const vec3_t d = v_sub(b, a);
