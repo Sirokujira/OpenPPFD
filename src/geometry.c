@@ -140,13 +140,61 @@ static int vaxis(vec3_t v)
 面の持ち主の遮蔽物 (自分自身は数えない。壁の面なら -1)。
 */
 static void face_contacts(const ppfd_t *p, int owner, vec3_t org, vec3_t ue, vec3_t ve,
-                          double *cu, int *ncu, double *cv, int *ncv)
+                          double *cu, int *ncu, double *cv, int *ncv, int *ndiag)
 {
 	const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
 	const int au = vaxis(ue), av = vaxis(ve), an = 3 - au - av;
 	const double ou = vcomp(org, au), ov = vcomp(org, av), w = vcomp(org, an);
 	const double lu = vcomp(ue, au), lv = vcomp(ve, av);
 	int io, s;
+
+	/*
+	斜めの板 : 板と面の平面の交わり (板が面に接する辺、または面を横切る線) を
+	求める。面内で軸に平行な線なら、その座標と両端を分割点に足す (板で仕切った
+	部屋の壁のパッチが仕切りをまたがない)。斜めの線は格子をそろえられないので
+	数えてログに出す (*ndiag)。
+	*/
+	for (io = 0; io < p->npanel; io++) {
+		const panel_t *pn = &p->panel[io];
+		vec3_t c[4], x[8];
+		double sd[4], umin = 1e300, umax = -1e300, vmin = 1e300, vmax = -1e300;
+		int    k, nx = 0;
+		c[0] = pn->org;
+		c[1] = v_add(pn->org, pn->eu);
+		c[2] = v_add(c[1], pn->ev);
+		c[3] = v_add(pn->org, pn->ev);
+		for (k = 0; k < 4; k++) sd[k] = vcomp(c[k], an) - w;
+		for (k = 0; k < 4; k++) {
+			const int k2 = (k + 1) % 4;
+			if (fabs(sd[k]) <= tol) {
+				x[nx++] = c[k];
+			}
+			else if ((fabs(sd[k2]) > tol) && ((sd[k] > 0.0) != (sd[k2] > 0.0))) {
+				x[nx++] = v_add(c[k], v_scale(v_sub(c[k2], c[k]), sd[k] / (sd[k] - sd[k2])));
+			}
+		}
+		if (nx < 2) continue;
+		for (k = 0; k < nx; k++) {
+			const double u = vcomp(x[k], au), v = vcomp(x[k], av);
+			if (u < umin) umin = u;
+			if (u > umax) umax = u;
+			if (v < vmin) vmin = v;
+			if (v > vmax) vmax = v;
+		}
+		if ((umax - umin <= tol) && (vmax - vmin <= tol)) continue;      /* 1 点で触れるだけ */
+		/* 面の矩形と重ならない交わりは関係ない */
+		if ((umax < ou - tol) || (umin > ou + lu + tol) || (vmax < ov - tol) || (vmin > ov + lv + tol)) continue;
+		if ((umax - umin > tol) && (vmax - vmin > tol)) {
+			(*ndiag)++;
+			continue;
+		}
+		for (s = 0; s < 2; s++) {
+			const double fu = (((s == 0) ? umin : umax) - ou) / lu;
+			const double fv = (((s == 0) ? vmin : vmax) - ov) / lv;
+			if ((fu * lu > tol) && ((1.0 - fu) * lu > tol)) cu[(*ncu)++] = fu;
+			if ((fv * lv > tol) && ((1.0 - fv) * lv > tol)) cv[(*ncv)++] = fv;
+		}
+	}
 
 	for (io = 0; io < p->nocc; io++) {
 		const occluder_t *o = &p->occ[io];
@@ -236,7 +284,7 @@ void setup_patch(ppfd_t *p)
 	面 g の分割点は cuts[g] の先頭 (nfu[g] + 1 個) と cuts[g] + cap の先頭。
 	*/
 	nface = 6 + (6 * p->nocc);
-	cap = (2 * p->nocc) + 1;
+	cap = (2 * (p->nocc + p->npanel)) + 1;
 	for (f = 0; f < 6; f++) {
 		if (p->wdivu[f] + 1 > cap) cap = p->wdivu[f] + 1;
 		if (p->wdivv[f] + 1 > cap) cap = p->wdivv[f] + 1;
@@ -245,18 +293,19 @@ void setup_patch(ppfd_t *p)
 		if (p->occ[io].ndivu + 1 > cap) cap = p->occ[io].ndivu + 1;
 		if (p->occ[io].ndivv + 1 > cap) cap = p->occ[io].ndivv + 1;
 	}
-	cap += (2 * p->nocc) + 1;
+	cap += (2 * (p->nocc + p->npanel)) + 1;
 	cuts = (double *)xmalloc((size_t)nface * 2 * (size_t)cap * sizeof(double));
 	nfu = (int *)xcalloc((size_t)nface, sizeof(int));
 	nfv = (int *)xcalloc((size_t)nface, sizeof(int));
-	cl  = (double *)xmalloc((size_t)(2 * (2 * p->nocc + 1)) * sizeof(double));
+	cl  = (double *)xmalloc((size_t)(2 * (2 * (p->nocc + p->npanel) + 1)) * sizeof(double));
 	p->nsnap_moved = 0;
 	p->nsnap_ins = 0;
+	p->nsnap_diag = 0;
 	for (g = 0; g < nface; g++) {
 		const double tol = 1e-12;
 		double *cu = &cuts[(size_t)g * 2 * cap];
 		double *cv = cu + cap;
-		double *clu = cl, *clv = cl + (2 * p->nocc + 1);
+		double *clu = cl, *clv = cl + (2 * (p->nocc + p->npanel) + 1);
 		int     ncu = 0, ncv = 0, du, dv, owner;
 		vec3_t  fo, fu, fv, fn;
 		if (g < 6) {
@@ -272,7 +321,7 @@ void setup_patch(ppfd_t *p)
 			occ_face(o, (g - 6) % 6, &fo, &fu, &fv, &fn);
 			du = o->ndivu; dv = o->ndivv;
 		}
-		face_contacts(p, owner, fo, fu, fv, clu, &ncu, clv, &ncv);
+		face_contacts(p, owner, fo, fu, fv, clu, &ncu, clv, &ncv, &p->nsnap_diag);
 		nfu[g] = snap_cuts(cu, du, clu, ncu, tol, &p->nsnap_moved, &p->nsnap_ins);
 		nfv[g] = snap_cuts(cv, dv, clv, ncv, tol, &p->nsnap_moved, &p->nsnap_ins);
 		n += nfu[g] * nfv[g];

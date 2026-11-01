@@ -307,8 +307,13 @@ void solve(ppfd_t *p)
 		}
 		if ((p->nsnap_moved + p->nsnap_ins) > 0) {
 			/* 格子を変えたことは黙らない (接触する遮蔽物の外形の線へ寄せた) */
-			plog(p, "patch grid aligned to occluder contact lines : %d lines moved, %d inserted\n",
+			plog(p, "patch grid aligned to contact lines : %d lines moved, %d inserted\n",
 				p->nsnap_moved, p->nsnap_ins);
+		}
+		if (p->nsnap_diag > 0) {
+			/* 斜めの接触線はそろえられない : パッチがまたぐので、そこを通して光が漏れうる */
+			plog(p, "  warning : %d panel contact lines are not parallel to the patch grid "
+				"(patches straddle them; refine div to reduce the leak)\n", p->nsnap_diag);
 		}
 		if (p->npcov > 0) {
 			plog(p, "patches in contact with a facing surface (no light, excluded) = %d\n", p->npcov);

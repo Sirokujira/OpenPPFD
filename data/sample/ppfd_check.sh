@@ -1130,10 +1130,35 @@ echo "== (ae) occluders in contact (grid aligned to contact lines, covered patch
 run contact.ppfd
 chkabs "contact: no leak above shelf" "$(sumrow above 5)" 0
 chkabs "contact: shelf closure" "$(logval 'closure error')" 1e-6
-if grep -q 'aligned to occluder contact lines : 4 lines moved' "$WORK/ppfd.log"; then
+if grep -q 'aligned to contact lines : 4 lines moved' "$WORK/ppfd.log"; then
 	echo "contact: grid alignment logged -> OK"
 else
 	echo "contact: grid alignment logged -> NG" >&2
+	status=1
+fi
+# 斜めの板 (panel) の仕切りでも同じ : 板と壁の交線へ格子をそろえる。x = 0.4 の鉛直な
+# 仕切り (光源は x < 0.4 だけ) の向こうは厳密に 0、同じ板を occluder で書いたものとビット一致
+# (以前は panel だけ格子をそろえず 0.119 漏れていた)
+for v in occ pan; do
+	case $v in
+	occ) o='occluder = shelf 0.4 0.4 0 1 0 1 white' ;;
+	pan) o='panel = shelf 0.4 0 0  0.4 1 0  0.4 0 1 white' ;;
+	esac
+	sed -e "s/^occluder = .*/$o/" -e 's/^led = .*/led = 0.2 0.5 0.5 1.0 g iso/' \
+	    -e 's/^target = above .*/target = left  0.3 4 8 0.0 0.4 0 1/' -e 's/^target = below .*/target = right 0.3 4 8 0.4 1.0 0 1/' \
+		"$SRC/contact.ppfd" > "$WORK/contact_div$v.ppfd"
+	run "contact_div$v.ppfd"
+	cp "$WORK/ppfd_map_left.csv" "$WORK/map_cdiv$v.csv"
+	chkabs "contact: $v divider no leak" "$(sumrow right 5)" 0
+done
+chkabs "contact: panel divider == occluder" "$(maxdiff map_cdivocc.csv map_cdivpan.csv)" 0
+# 格子の軸に平行でない接触線 (斜めの仕切りと床・天井の交線) はそろえられないのでログで警告する
+sed -e 's/^occluder = .*/panel = d 0.2 0 0  0.8 1 0  0.2 0 1 white/' "$SRC/contact.ppfd" > "$WORK/contact_diag.ppfd"
+run contact_diag.ppfd
+if grep -q 'warning : 2 panel contact lines are not parallel' "$WORK/ppfd.log"; then
+	echo "contact: diagonal contact warned -> OK"
+else
+	echo "contact: diagonal contact warned -> NG" >&2
 	status=1
 fi
 # 面どうしの接触 : 光源を上へ移し、棚板を接触する遮蔽物に置き換えた変種の収支

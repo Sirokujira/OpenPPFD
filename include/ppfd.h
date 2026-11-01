@@ -263,6 +263,7 @@ typedef struct {
 	/* 導出量 */
 	int       npatch;
 	int       nsnap_moved, nsnap_ins; /* 接触線にそろえた格子線 (動かした / 挿入した本数) */
+	int       nsnap_diag;           /* 格子の軸に平行でない接触線の数 (そろえられない) */
 	unsigned char *pcov;            /* [npatch] 1 : 向かい合う面と接して覆われたパッチ (光が届かない) */
 	int       npcov;
 	patch_t  *patch;
