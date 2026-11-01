@@ -244,11 +244,54 @@ static int build_material(ppfd_t *p, pmat_t *m, char **tok, int ntok, int k)
 }
 
 /* スペクトル (ビン重み、総和 1) を組み立てる。戻り値 0 = 成功 */
+/*
+スペクトルの放射束のうち、計算する波長範囲 [lam0 - dλ/2, lam_end + dλ/2] に
+入る割合。範囲外の分は計算に乗らない : W 欄で与えた放射束 (スペクトル全体の
+値) にこの割合を掛けて範囲内の分だけを光源に持たせる (以前は範囲内のビンへ
+全量を押し込んでいたので、400-700 nm の計算に 730 nm の LED 1 W を入れると
+PPF が 2000 倍に、3000 K の黒体なら +56% になっていた)。外れが 1e-4 (0.01%)
+未満なら厳密に 1 とする : 白色 LED の蛍光体のガウス形の裾 (380-780 nm の外へ
+1e-5 程度) のような無視できる分で値もログも変えない (ふつうの入力は 1 ビットも
+変わらない)。
+*/
+static double spec_fin(double fout)
+{
+	return (fout < 1e-4) ? 1.0 : (1.0 - fout);
+}
+
+/* ガウス形 (中心 c、半値全幅 fw) の範囲 [lo, hi] の外の割合 */
+static double gauss_out(double c, double fw, double lo, double hi)
+{
+	const double sig = fw / (2.0 * sqrt(2.0 * log(2.0)));
+	return 0.5 * erfc((hi - c) / (sig * sqrt(2.0))) + 0.5 * erfc((c - lo) / (sig * sqrt(2.0)));
+}
+
+/* 区分線形の表の [a, b] の積分 (表の範囲の外は 0) */
+static double table_integral(const double *x, const double *y, int n, double a, double b)
+{
+	double s = 0.0;
+	int    j;
+	for (j = 0; j + 1 < n; j++) {
+		const double x0 = x[j], x1 = x[j + 1];
+		const double l = (x0 > a) ? x0 : a, h = (x1 < b) ? x1 : b;
+		if ((x1 <= x0) || (h <= l)) continue;
+		{
+			const double yl = y[j] + ((y[j + 1] - y[j]) * (l - x0) / (x1 - x0));
+			const double yh = y[j] + ((y[j + 1] - y[j]) * (h - x0) / (x1 - x0));
+			s += 0.5 * (yl + yh) * (h - l);
+		}
+	}
+	return s;
+}
+
 static int build_spectrum(ppfd_t *p, spec_t *s, char **tok, int ntok, int k)
 {
+	const double glo = p->lam0 - (0.5 * p->dlam);
+	const double ghi = p->lam[p->nlam - 1] + (0.5 * p->dlam);
 	int i;
 
 	s->w = (double *)xcalloc((size_t)p->nlam, sizeof(double));
+	s->fin = 1.0;
 	if (k >= ntok) return 1;
 
 	if (streq_ci(tok[k], "mono")) {
@@ -281,12 +324,14 @@ static int build_spectrum(ppfd_t *p, spec_t *s, char **tok, int ntok, int k)
 			s->w[i] = exp(-4.0 * log(2.0) * t * t);
 		}
 		spec_normalize(s->w, p->nlam);
+		s->fin = spec_fin(gauss_out(c, fw, glo, ghi));
 		return 0;
 	}
 	else if (streq_ci(tok[k], "sum")) {
 		/* 3 つ組 (中心, 半値全幅, 重み) の繰り返し : 白色 LED = 青ピーク + 蛍光体 */
 		int j;
 		int npeak = 0;
+		double wsum = 0.0, wout = 0.0;
 		for (j = k + 1; j + 2 < ntok; j += 3) {
 			const double c = atof(tok[j]);
 			const double fw = atof(tok[j + 1]);
@@ -296,10 +341,14 @@ static int build_spectrum(ppfd_t *p, spec_t *s, char **tok, int ntok, int k)
 				const double t = (p->lam[i] - c) / fw;
 				s->w[i] += a * exp(-4.0 * log(2.0) * t * t);
 			}
+			/* ピークの放射束は a × fw に比例 (ガウス形の積分) */
+			wsum += a * fw;
+			wout += a * fw * gauss_out(c, fw, glo, ghi);
 			npeak++;
 		}
 		if (npeak == 0) return 1;
 		spec_normalize(s->w, p->nlam);
+		if (wsum > 0.0) s->fin = spec_fin(wout / wsum);
 		return 0;
 	}
 	else if (streq_ci(tok[k], "blackbody")) {
@@ -311,6 +360,27 @@ static int build_spectrum(ppfd_t *p, spec_t *s, char **tok, int ntok, int k)
 			s->w[i] = (x < 700.0) ? (1.0 / (pow(lm, 5.0) * (exp(x) - 1.0))) : 0.0;
 		}
 		spec_normalize(s->w, p->nlam);
+		/*
+		範囲内の割合 : ∫_lo^hi λ^-5 / (e^{a/λ} - 1) dλ (Simpson、4000 区間) と
+		全波長の積分 a^-4 π^4 / 15 (a = hc / kT) の比
+		*/
+		{
+			const double a = (H_PLANCK * C0) / (K_BOLTZ * T);
+			const int    nsimp = 4000;
+			const double lo = (glo > 1.0 ? glo : 1.0) * 1e-9, hi = ghi * 1e-9;
+			const double h = (hi - lo) / nsimp;
+			double sum = 0.0, tot;
+			int    j;
+			for (j = 0; j <= nsimp; j++) {
+				const double lm = lo + (j * h);
+				const double x = a / lm;
+				const double f = (x < 700.0) ? (1.0 / (pow(lm, 5.0) * (exp(x) - 1.0))) : 0.0;
+				sum += f * (((j == 0) || (j == nsimp)) ? 1.0 : ((j % 2) ? 4.0 : 2.0));
+			}
+			sum *= h / 3.0;
+			tot = pow(PI, 4.0) / (15.0 * pow(a, 4.0));
+			s->fin = spec_fin(1.0 - (sum / tot));
+		}
 		return 0;
 	}
 	else if (streq_ci(tok[k], "table") || streq_ci(tok[k], "file")) {
@@ -348,6 +418,11 @@ static int build_spectrum(ppfd_t *p, spec_t *s, char **tok, int ntok, int k)
 			if (s->w[i] < 0.0) s->w[i] = 0.0;
 		}
 		spec_normalize(s->w, p->nlam);
+		/* 表の範囲のうち計算する波長範囲に入る割合 (表は区分線形、表の外は数えない) */
+		{
+			const double tot = table_integral(xl, y1, n, -1e300, 1e300);
+			if (tot > 0.0) s->fin = spec_fin(1.0 - (table_integral(xl, y1, n, glo, ghi) / tot));
+		}
 		free(xl); free(y1); free(y2);
 		return 0;
 	}
@@ -436,6 +511,8 @@ static double flux_from_lm(const ppfd_t *p, int is, double lm)
 /* led / array 共通のオプション引数を読む。戻り値 0 = 成功 */
 static int emitter_options(ppfd_t *p, emitter_t *e, char **tok, int ntok, int k)
 {
+	int bycat = 0;          /* ppf / lumens で与えた (範囲内の放射束がそのまま出る) */
+
 	while (k < ntok) {
 		if (streq_ci(tok[k], "beam") && (k + 1 < ntok)) {
 			e->mexp = atof(tok[k + 1]);
@@ -478,16 +555,24 @@ static int emitter_options(ppfd_t *p, emitter_t *e, char **tok, int ntok, int k)
 		else if (streq_ci(tok[k], "ppf") && (k + 1 < ntok)) {
 			/* 放射束をカタログの PPF [µmol/s] で与える (W 欄は無視される) */
 			e->flux = flux_from_ppf(p, e->ispec, atof(tok[k + 1]));
+			bycat = 1;
 			k += 2;
 		}
 		else if (streq_ci(tok[k], "lumens") && (k + 1 < ntok)) {
 			e->flux = flux_from_lm(p, e->ispec, atof(tok[k + 1]));
+			bycat = 1;
 			k += 2;
 		}
 		else {
 			return 1;   /* 未知のオプション */
 		}
 	}
+	/*
+	W 欄の放射束はスペクトル全体の値なので、計算する波長範囲に入る分だけを
+	持たせる。ppf / lumens からの換算は範囲内の重みで解くので、もともと範囲内の
+	放射束になっている (PAR・V(λ) が範囲に入っていれば厳密)。
+	*/
+	if (!bycat) e->flux *= p->spec[e->ispec].fin;
 	make_frame(e);
 	if (e->nu < 1) e->nu = 1;
 	if (e->nv < 1) e->nv = 1;

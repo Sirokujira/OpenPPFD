@@ -20,7 +20,7 @@ V(λ) ではなく McCree 作用曲線、lm ではなく µmol/m²/s。この 2 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 
-# 検証 : 解析解・SI 定義値との比較 (全 241 判定)
+# 検証 : 解析解・SI 定義値との比較 (全 249 判定)
 sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
 ```
 
@@ -83,6 +83,16 @@ sh data/sample/ppfd_check.sh bin/oppfd /tmp/ppfd-check
   性質が `683 lm/W` の検証に効いているので崩さない。
 - 光量子換算係数 `PHOTON_K` は h, c, N_A の SI 定義値だけからなる厳密量。
   丸めた定数 (0.836 等) に置き換えない。
+- **W 欄の放射束はスペクトル全体の値。計算する波長範囲の外の分は捨てて
+  ログに出す** (`spec_t.fin`、`build_spectrum`)。スペクトルは範囲内のビンで
+  総和 1 に正規化するので、範囲外の分を補正しないとその放射束が範囲内へ
+  押し込まれる (400-700 nm の計算で 730 nm の LED 1 W が PPF 2000 倍、3000 K の
+  黒体が +56%)。範囲 `[lam0 - dλ/2, lam_end + dλ/2]` の外の割合を解析的に
+  求め (ガウス形は erfc、黒体は Planck の全積分 `π⁴/(15 a⁴)` と Simpson、表は
+  区分線形)、W 欄の光源にだけ掛ける (`ppf` / `lumens` は範囲内の重みで解く
+  ので掛けない)。外れが 1e-4 未満なら 1 (白色 LED の蛍光体の裾で値もログも
+  変えない、ビット一致)。400-700 nm を覆わない範囲は警告する。`range.ppfd`
+  (黒体の PPF の解析解、範囲によらない) が縛る。
 - **鏡面反射は鏡像法で解く**。軸並行の直方体なので鏡面壁は光源の鏡像と
   等価で、直接光は厳密になる (近似は段数の打ち切りだけ)。鏡像からの
   直線は折り返した経路なので、`leafscatter` の層への預け入れも展開した

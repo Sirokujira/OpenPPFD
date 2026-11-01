@@ -137,6 +137,25 @@ void output_log(ppfd_t *p)
 	}
 
 	plog(p, "\n--- source totals ---\n");
+	{
+		/*
+		計算する波長範囲から外れるスペクトルの分は計算に乗らない (W 欄の
+		放射束は範囲内の分だけにしてある)。黙って捨てずにここで示す。
+		*/
+		int is;
+		for (is = 0; is < p->nspec; is++) {
+			if (p->spec[is].fin < 1.0) {
+				plog(p, "  * spectrum \"%s\" : %.4g %% of its radiant flux lies outside %g - %g nm "
+					"and is not modelled (W-rated sources keep only the in-range part)\n",
+					p->spec[is].name, 100.0 * (1.0 - p->spec[is].fin),
+					p->lam0 - (0.5 * p->dlam), p->lam[p->nlam - 1] + (0.5 * p->dlam));
+			}
+		}
+		if ((p->lam0 - (0.5 * p->dlam) > 400.0 + 1e-9) || (p->lam[p->nlam - 1] + (0.5 * p->dlam) < 700.0 - 1e-9)) {
+			plog(p, "  * warning : the wavelength range does not cover 400 - 700 nm; PPF / PPFD count only "
+				"the computed part of PAR\n");
+		}
+	}
 	plog(p, "radiant flux      = %12.6g W\n", p->flux_total);
 	plog(p, "PPF (400-700nm)   = %12.6g umol/s\n", p->ppf_total);
 	plog(p, "luminous flux     = %12.6g lm\n", lm_total);

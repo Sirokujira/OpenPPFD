@@ -1293,6 +1293,38 @@ for v in box divider panel; do
 	fi
 done
 
+echo "== (ah) spectrum partly outside the wavelength range =="
+# range.ppfd : 3000 K の黒体 1 W を 400-700 nm で計算。範囲外の分は計算に乗らない
+run range.ppfd
+chk "range: blackbody PPF (exact)" "$(logval 'PPF (400-700nm)')" 0.4028691 2e-4
+chk "range: in-range radiant flux" "$(logval 'radiant flux')" 0.08232771 1e-5
+if grep -q 'spectrum "bb" : 91.77 % of its radiant flux lies outside' "$WORK/ppfd.log"; then
+	echo "range: out-of-range part logged -> OK"
+else
+	echo "range: out-of-range part logged -> NG" >&2
+	status=1
+fi
+chkabs "range: closure" "$(logval 'closure error')" 1e-6
+# PPF は計算する波長範囲によらない
+for w in "380 780 5" "300 2000 5"; do
+	sed "s/^wavelength = .*/wavelength = $w/" "$SRC/range.ppfd" > "$WORK/range_w.ppfd"
+	run range_w.ppfd
+	chk "range: PPF with $w" "$(logval 'PPF (400-700nm)')" 0.4028691 2e-4
+done
+# ppf で与えた光源は範囲内の放射束で解くので PPF がそのまま出る
+sed 's/^led = .*/led = 0.5 0.5 0.9 1.0 bb iso ppf 10/' "$SRC/range.ppfd" > "$WORK/range_ppf.ppfd"
+run range_ppf.ppfd
+chk "range: ppf-rated source" "$(logval 'PPF (400-700nm)')" 10 1e-9
+# 400-700 nm を覆わない範囲は警告する (PPF は計算した部分だけ)
+sed 's/^wavelength = .*/wavelength = 450 650 5/' "$SRC/range.ppfd" > "$WORK/range_narrow.ppfd"
+run range_narrow.ppfd
+if grep -q 'does not cover 400 - 700 nm' "$WORK/ppfd.log"; then
+	echo "range: narrow range warned -> OK"
+else
+	echo "range: narrow range warned -> NG" >&2
+	status=1
+fi
+
 echo
 if [ "$status" -ne 0 ]; then
 	echo "*** PPFD validation FAILED" >&2

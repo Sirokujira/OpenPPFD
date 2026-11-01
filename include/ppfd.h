@@ -65,6 +65,7 @@ typedef struct {
 	char    name[NAMELEN];
 	double *w;                      /* [nlam] Σw = 1 */
 	int     i0, i1;                 /* w != 0 のビン範囲 (両端含む)。内側ループの短縮用 */
+	double  fin;                    /* 放射束のうち計算する波長範囲に入る割合 (外れが 1e-4 未満なら 1) */
 } spec_t;
 
 /* ---- 実測配光 (IESNA LM-63 / EULUMDAT) ----------------------------- */
