@@ -1,0 +1,26 @@
+# 検証 (ah) 計算する波長範囲から外れるスペクトル
+#
+# W 欄の放射束はスペクトル全体の値。計算する波長範囲 (ビンの端まで :
+# 400-700 nm, 5 nm なら 397.5-702.5 nm) の外の分は計算に乗らないので、
+# 光源には範囲内の分だけを持たせ、外れた割合をログに出す。
+# 以前は範囲内のビンへ全量を押し込んでいた : 400-700 nm で 730 nm の LED 1 W は
+# PPF が 2000 倍、3000 K の黒体 1 W は +56% (4.89 umol/s)。
+#
+# 期待値 (3000 K の黒体 1 W、黒いチャンバ)
+#   PPF = (1 W) ∫_400^700 λ B_λ dλ / (h c N_A ∫_0^∞ B_λ dλ)
+#       = 0.4028691 umol/s   (∫_0^∞ λ^-5/(e^{a/λ}-1) dλ = π^4/(15 a^4), a = hc/kT)
+#   範囲内の放射束 (397.5-702.5 nm) = 0.08232771 W
+# PPF は計算する波長範囲によらない (380-780 / 400-700 / 300-2000 nm で同じ)。
+# ppf で与えた光源は範囲内の放射束で解くので PPF がそのまま出る。
+
+OpenPPFD 1 0
+title = spectrum partly outside the wavelength range
+wavelength = 400 700 5
+chamber    = 1.0 1.0 1.0
+patchdiv   = 4 4
+material = black gray 0.0
+wall = all  black
+spectrum = bb blackbody 3000
+led = 0.5 0.5 0.9 1.0 bb iso
+target = floor 0.0 4 4
+end

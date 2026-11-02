@@ -24,22 +24,9 @@ static void gather_target(ppfd_t *p)
 	const int n = p->npatch;
 	const int nl = p->nlam;
 	double *kext = (double *)xcalloc((size_t)nl, sizeof(double));
-	vec3_t  ctop[4], cbot[4];
 	strans_t *str = (strans_t *)xmalloc((size_t)MAXSPECT * sizeof(strans_t));
 	const int nstr = spec_transforms(p, str, MAXSPECT);
 	int     it, i;
-
-	if (p->canopy.on && p->canopy.scatter) {
-		const double zt = p->canopy.ztop, zb = p->canopy.zbot;
-		ctop[0] = v_make(0.0, 0.0, zt);   ctop[1] = v_make(p->Lx, 0.0, zt);
-		ctop[2] = v_make(p->Lx, p->Ly, zt); ctop[3] = v_make(0.0, p->Ly, zt);
-		cbot[0] = v_make(0.0, 0.0, zb);   cbot[1] = v_make(p->Lx, 0.0, zb);
-		cbot[2] = v_make(p->Lx, p->Ly, zb); cbot[3] = v_make(0.0, p->Ly, zb);
-	}
-	else {
-		memset(ctop, 0, sizeof(ctop));
-		memset(cbot, 0, sizeof(cbot));
-	}
 
 	if (p->canopy.on) {
 		for (i = 0; i < nl; i++) kext[i] = canopy_kext(p, i);
@@ -58,42 +45,97 @@ static void gather_target(ppfd_t *p)
 		for (ic = 0; ic < ncell; ic++) {
 			const int ix = ic % t->nx;
 			const int iy = ic / t->nx;
-			const vec3_t nz = {0.0, 0.0, 1.0};
-			const vec3_t x = {t->x0 + ((ix + 0.5) * dx), t->y0 + ((iy + 0.5) * dy), t->z};
+			/* 受光面の法線 (target は上向き (0,0,1)、sensor は任意の向き) */
+			const vec3_t nz = t->n;
+			/* target は従来の式のまま (1 ビットも変えないため)。sensor は隅 + 2 辺 */
+			const vec3_t x = t->sensor
+				? v_add(t->org, v_add(v_scale(t->eu, (ix + 0.5) / t->nx), v_scale(t->ev, (iy + 0.5) / t->ny)))
+				: v_make(t->x0 + ((ix + 0.5) * dx), t->y0 + ((iy + 0.5) * dy), t->z);
 			double *E = &t->E[(size_t)ic * nl];
+			/* パッチへの経路の標本 (点 -> パッチは最大 4 x 4) と経路長の 2 点則 */
+			vec3_t xa[16], yb[16];
+			double W[16];
+			float  pl[PLEN_N];
 			int ip, il, i2;
 
 			direct_point(p, x, nz, E);
 
 			if (p->canopy.on && p->canopy.scatter) {
-				/* 群落が返す拡散光 : 外なら上下面から、内部なら層の下向き流束 */
-				if (x.z >= p->canopy.ztop) {
-					const double f = ff_point_poly(x, nz, ctop, 4);
-					for (il = 0; il < nl; il++) E[il] += f * p->cbtop[il];
-				}
-				else if (x.z <= p->canopy.zbot) {
-					const double f = ff_point_poly(x, nz, cbot, 4);
-					for (il = 0; il < nl; il++) E[il] += f * p->cbbot[il];
-				}
-				else {
-					for (il = 0; il < nl; il++) E[il] += canopy_interior(p, il, x.z);
+				/*
+				群落が返す拡散光 : スラブごとに、外なら上下面から、内部なら層の
+				流束から。遮蔽物があれば面を小矩形に割って可視率を掛ける (棚板の
+				向こうのスラブの面は見えない = 0)。
+				*/
+				int js;
+				for (js = 0; js < p->nslab; js++) {
+					const cslab_t *sl = &p->slab[js];
+					const double *bt = &p->cbtop[(size_t)js * nl];
+					const double *bb = &p->cbbot[(size_t)js * nl];
+					vec3_t c0[4];
+					int hasup = 0, hasdn = 0, k;
+					/* 隣の段より向こうからは、このスラブの面は見えない */
+					for (k = 0; k < p->nslab; k++) {
+						if (p->slab[k].tier == sl->tier - 1) {
+							hasup = 1;
+							if (x.z >= p->slab[k].zbot) break;
+						}
+						if (p->slab[k].tier == sl->tier + 1) {
+							hasdn = 1;
+							if (x.z <= p->slab[k].ztop) break;
+						}
+					}
+					if (k < p->nslab) continue;
+					if ((x.z >= sl->ztop) || (x.z <= sl->zbot)) {
+						const int istop = (x.z >= sl->ztop);
+						const int outer = istop ? !hasup : !hasdn;
+						const double zc = istop ? sl->ztop : sl->zbot;
+						const double *bf = istop ? bt : bb;
+						double f;
+						/* 面が棚板・床などに乗っていれば、面は向こう側から見えない */
+						if (istop ? sl->resttop : sl->restbot) continue;
+						/* 面の矩形 (栽培ベッドならベッドの範囲。断面全体なら従来どおり) */
+						c0[0] = v_make(sl->x0, sl->y0, zc); c0[1] = v_make(sl->x1, sl->y0, zc);
+						c0[2] = v_make(sl->x1, sl->y1, zc); c0[3] = v_make(sl->x0, sl->y1, zc);
+						f = canopy_plane_ff_point(p, x, nz, c0, NULL);
+						for (i2 = 0; i2 < nstr; i2++) {
+							/*
+							鏡面で折り返して見える面 (面の鏡像)。上面は天井で 1 回
+							(n2 = +1)、下面は床で 1 回 (n2 = -1) まで : それより先の
+							経路は自分の面を通って群落へ戻る (canopy_setup と同じ)
+							*/
+							vec3_t c4[4];
+							int    v;
+							if ((str[i2].n[2] != 0) && (!outer || (str[i2].n[2] != (istop ? 1 : -1)))) continue;
+							for (v = 0; v < 4; v++) c4[v] = spec_apply(p, &str[i2], c0[v]);
+							f += str[i2].w * canopy_plane_ff_point(p, x, nz, c4, str[i2].n);
+						}
+						for (il = 0; il < nl; il++) E[il] += f * bf[il];
+					}
+					else if ((x.x >= sl->x0) && (x.x <= sl->x1) && (x.y >= sl->y0) && (x.y <= sl->y1)) {
+						/* ベッドの内部 (通路にいる測定面はベッドの側面からの横の光を受けない) */
+						for (il = 0; il < nl; il++) E[il] += canopy_interior(p, js, il, x.z, nz.z);
+					}
 				}
 			}
 
 			for (ip = 0; ip < n; ip++) {
 				const patch_t *q = &p->patch[ip];
 				const double *B = &p->B[(size_t)ip * nl];
-				double f, s;
+				double f;
 				/* パッチの表側から見ているか (遮蔽物の裏面を拾わないため) */
 				if (v_dot(q->n, v_sub(x, q->p[0])) <= 0.0) continue;
 				f = ff_point_poly(x, nz, q->p, 4);
 				if (f <= 0.0) continue;
-				f *= vis_point_patch(p, x, q, NULL);
+				f *= vis_point_patch(p, x, q, NULL, NULL);
 				if (f <= 0.0) continue;
-				s = canopy_path(p, x, q->c);
-				if (s > 0.0) {
+				pl[1] = 0.0f;
+				if (p->canopy.on) {
+					const int ns = canopy_point_samples(p, x, nz, q->p, q->n, NULL, xa, yb, W);
+					canopy_plen(p, ns, xa, yb, W, pl);
+				}
+				if (pl[1] > 0.0f) {
 					for (il = 0; il < nl; il++) {
-						E[il] += B[il] * f * exp(-kext[il] * s);
+						E[il] += B[il] * f * plen_trans(pl, kext[il]);
 					}
 				}
 				else {
@@ -109,7 +151,7 @@ static void gather_target(ppfd_t *p)
 					const patch_t *q = &p->patch[ip];
 					const double *B = &p->B[(size_t)ip * nl];
 					vec3_t q4[4], nj;
-					double f, s;
+					double f;
 					int    v;
 					if (spec_on_mirror(p, &str[i2], q)) continue;
 					for (v = 0; v < 4; v++) q4[v] = spec_apply(p, &str[i2], q->p[v]);
@@ -117,12 +159,25 @@ static void gather_target(ppfd_t *p)
 					if (v_dot(nj, v_sub(x, q4[0])) <= 0.0) continue;
 					f = str[i2].w * ff_point_poly(x, nz, q4, 4);
 					if (f <= 0.0) continue;
-					/* 鏡像重心への直線から実経路の群落内長さを測る
+					if (occ_any(p)) {
+						/* 鏡像パッチへの直線を折り返して棚板の鏡像と照合する */
+						patch_t qm = *q;
+						for (v = 0; v < 4; v++) qm.p[v] = q4[v];
+						qm.n = nj;
+						qm.c = spec_apply(p, &str[i2], q->c);
+						f *= vis_point_patch(p, x, &qm, str[i2].n, NULL);
+						if (f <= 0.0) continue;
+					}
+					/* 鏡像パッチへの直線から実経路の群落内長さを測る
 					   (床・天井の鏡映ぶんは canopy_path が折り返す) */
-					s = canopy_path(p, x, spec_apply(p, &str[i2], q->c));
-					if (s > 0.0) {
+					pl[1] = 0.0f;
+					if (p->canopy.on) {
+						const int ns = canopy_point_samples(p, x, nz, q4, nj, str[i2].n, xa, yb, W);
+						canopy_plen(p, ns, xa, yb, W, pl);
+					}
+					if (pl[1] > 0.0f) {
 						for (il = 0; il < nl; il++) {
-							E[il] += B[il] * f * exp(-kext[il] * s);
+							E[il] += B[il] * f * plen_trans(pl, kext[il]);
 						}
 					}
 					else {
@@ -193,30 +248,103 @@ static void energy_balance(ppfd_t *p)
 	free(E);
 }
 
+/* モンテカルロのときの光源の総量 (energy_balance の前半と同じ) */
+static void source_totals(ppfd_t *p)
+{
+	const int nl = p->nlam;
+	double *E = (double *)xcalloc((size_t)nl, sizeof(double));
+	int     ie, il;
+
+	p->flux_total = 0.0;
+	p->watt_total = 0.0;
+	p->ppf_total = 0.0;
+	for (ie = 0; ie < p->nemit; ie++) {
+		const emitter_t *e = &p->emit[ie];
+		p->flux_total += e->flux;
+		p->watt_total += e->watt;
+		for (il = 0; il < nl; il++) E[il] = e->flux * p->spec[e->ispec].w[il];
+		p->ppf_total += calc_ppfd(p, E);
+	}
+	free(E);
+}
+
 void solve(ppfd_t *p)
 {
 	double t0;
 
+	if (p->mc_n > 0) {
+		/* 光子追跡 : 形態係数・鏡像・ラジオシティは使わない (montecarlo.c) */
+		t0 = cputime();
+		setup_target(p);
+		plog(p, "monte carlo : %d photons, seed %llu (cell values are cell averages)\n",
+			p->mc_n, p->mc_seed);
+		mc_solve(p);
+		plog(p, "monte carlo done  (%.2f s)\n", cputime() - t0);
+		source_totals(p);
+		return;
+	}
+
 	t0 = cputime();
+	spec_fit_order(p);
 	setup_patch(p);
 	setup_target(p);
-	plog(p, "patches = %d (chamber %d x %d x %d, occluders %d), spectral bins = %d\n",
-		p->npatch, 6, p->ndivu, p->ndivv,
-		p->npatch - (6 * p->ndivu * p->ndivv), p->nlam);
+	{
+		int f, i, nwall = 0, uniform = 1;
+		for (i = 0; i < p->npatch; i++) {
+			if (p->patch[i].iface < 6) nwall++;
+		}
+		for (f = 0; f < 6; f++) {
+			if ((p->wdivu[f] != p->ndivu) || (p->wdivv[f] != p->ndivv)) uniform = 0;
+		}
+		if (p->nsnap_ins > 0) uniform = 0;
+		if (uniform) {
+			plog(p, "patches = %d (chamber %d x %d x %d, occluders/panels %d), spectral bins = %d\n",
+				p->npatch, 6, p->ndivu, p->ndivv, p->npatch - nwall, p->nlam);
+		}
+		else {
+			plog(p, "patches = %d (chamber %d, per-face div, occluders/panels %d), spectral bins = %d\n",
+				p->npatch, nwall, p->npatch - nwall, p->nlam);
+		}
+		if ((p->nsnap_moved + p->nsnap_ins) > 0) {
+			/* 格子を変えたことは黙らない (接触する遮蔽物の外形の線へ寄せた) */
+			plog(p, "patch grid aligned to contact lines : %d lines moved, %d inserted\n",
+				p->nsnap_moved, p->nsnap_ins);
+		}
+		if (p->nsnap_diag > 0) {
+			/* 斜めの接触線はそろえられない : パッチがまたぐので、そこを通して光が漏れうる */
+			plog(p, "  warning : %d panel contact lines are not parallel to the patch grid "
+				"(patches straddle them; refine div to reduce the leak)\n", p->nsnap_diag);
+		}
+		if (p->npcov > 0) {
+			plog(p, "patches in contact with a facing surface (no light, excluded) = %d\n", p->npcov);
+		}
+	}
 
 	setup_ff(p);
 	plog(p, "form factor : row sum error = %.3e, reciprocity error = %.3e  (%.2f s)\n",
 		p->ff_rowsum_err, p->ff_recip_err, cputime() - t0);
 	if (p->canopy.on && p->canopy.scatter) {
 		canopy_setup(p);
-		plog(p, "canopy scatter : %d layers, plane closure up/down = %.4f / %.4f, "
-			"buried patches = %d of %d\n",
-			p->canopy.nlayer, p->cnorm_up, p->cnorm_dn, p->cnburied, p->npatch);
+		if (p->nslab == 1) {
+			plog(p, "canopy scatter : %d layers, plane closure up/down = %.4f / %.4f, "
+				"buried patches = %d of %d\n",
+				p->canopy.nlayer, p->cnorm_up[0], p->cnorm_dn[0], p->cnburied, p->npatch);
+		}
+		else {
+			int js;
+			plog(p, "canopy scatter : %d slabs x %d layers, buried patches = %d of %d\n",
+				p->nslab, p->canopy.nlayer, p->cnburied, p->npatch);
+			for (js = 0; js < p->nslab; js++) {
+				plog(p, "  slab %d (z = %g..%g) : plane closure up/down = %.4f / %.4f\n",
+					js, p->slab[js].zbot, p->slab[js].ztop, p->cnorm_up[js], p->cnorm_dn[js]);
+			}
+		}
 	}
-	if (p->nocc > 0) {
+	if (occ_any(p)) {
 		/* 遮蔽が部分的な対だけは標本化 (= 厳密でない) なので数を出す */
-		plog(p, "occluders   : %d, partially shadowed patch pairs = %d, enclosed patches = %d\n",
-			p->nocc, p->ff_npartial, p->ff_nblind);
+		plog(p, "occluders   : %d, panels %d, partially shadowed patch pairs = %d, "
+			"enclosed patches = %d\n",
+			p->nocc, p->npanel, p->ff_npartial, p->ff_nblind);
 	}
 
 	setup_images(p);

@@ -74,6 +74,75 @@ static int skip_line(FILE *fp, char *buf, size_t sz)
 }
 
 /* ---- 正規化 : ∫ Î dΩ = 1 にする。戻り値 = 正規化前の ∫ I dΩ ------- */
+/* ∫_a^b (Ka + q (x - a)) cos x dx (区分線形な関数と cos の積の閉形式) */
+static double lin_cos(double a, double b, double ka, double kb)
+{
+	const double h = b - a;
+	const double q = (h > 0.0) ? ((kb - ka) / h) : 0.0;
+	return (ka * (sin(b) - sin(a))) + (q * ((h * sin(b)) + cos(b) - cos(a)));
+}
+
+/*
+光度分布型 A / B の正規化。表は水平角 H (cpl) x 鉛直角 V (gam) の双線形。
+  型 A : dΩ = cos V dV dH (H は鉛直軸まわりの方位角、V は仰角)
+  型 B : dΩ = cos H dH dV (V は横軸まわりの面の回転角、H は横軸への緯度)
+内側の積分は区分線形なので台形則が厳密、外側は lin_cos の閉形式。
+*/
+static double photdist_normalize_ab(photdist_t *d)
+{
+	const double deg = PI / 180.0;
+	const int ng = d->ng, nc = d->nc;
+	double total = 0.0;
+	int    ig, ic;
+
+	if (d->ptype == 3) {
+		/* 型 A : K(V) = ∫ I dH、total = ∫ K(V) cos V dV */
+		double *K = (double *)xcalloc((size_t)ng, sizeof(double));
+		for (ig = 0; ig < ng; ig++) {
+			if (nc <= 1) {
+				K[ig] = PI * d->I[ig];                  /* H は -90..90 で一定 */
+			}
+			else {
+				for (ic = 0; ic < nc - 1; ic++) {
+					K[ig] += 0.5 * (d->cpl[ic + 1] - d->cpl[ic]) * deg
+					       * (d->I[((size_t)ic * ng) + ig] + d->I[((size_t)(ic + 1) * ng) + ig]);
+				}
+			}
+		}
+		for (ig = 0; ig < ng - 1; ig++) {
+			total += lin_cos(d->gam[ig] * deg, d->gam[ig + 1] * deg, K[ig], K[ig + 1]);
+		}
+		free(K);
+	}
+	else {
+		/* 型 B : K(H) = ∫ I dV、total = ∫ K(H) cos H dH */
+		const int nh = (nc <= 1) ? 1 : nc;
+		double *K = (double *)xcalloc((size_t)nh, sizeof(double));
+		for (ic = 0; ic < nh; ic++) {
+			for (ig = 0; ig < ng - 1; ig++) {
+				K[ic] += 0.5 * (d->gam[ig + 1] - d->gam[ig]) * deg
+				       * (d->I[((size_t)ic * ng) + ig] + d->I[((size_t)ic * ng) + ig + 1]);
+			}
+		}
+		if (nh == 1) {
+			total = 2.0 * K[0];                          /* ∫ cos H dH (-90..90) = 2 */
+		}
+		else {
+			for (ic = 0; ic < nh - 1; ic++) {
+				total += lin_cos(d->cpl[ic] * deg, d->cpl[ic + 1] * deg, K[ic], K[ic + 1]);
+			}
+		}
+		free(K);
+	}
+
+	if (total > EPS) {
+		const size_t n = (size_t)ng * ((nc > 0) ? nc : 1);
+		size_t k;
+		for (k = 0; k < n; k++) d->I[k] /= total;
+	}
+	return total;
+}
+
 static double photdist_normalize(photdist_t *d)
 {
 	const double deg = PI / 180.0;
@@ -219,9 +288,60 @@ static int load_ies(photdist_t *d, const char *path)
 
 	for (i = 0; i < ng * ncr; i++) iraw[i] *= scale;
 
-	/* 光度分布型 (hdr[5]) : 1 = type C。B / A は未対応なので type C として扱う */
+	/* 光度分布型 (hdr[5]) : 1 = type C、2 = type B、3 = type A */
 	d->ptype = (int)(hdr[5] + 0.5);
 	d->watt  = hdr[12];
+
+	if ((d->ptype == 2) || (d->ptype == 3)) {
+		/*
+		型 A / B : 鉛直角 V (gam) と水平角 H (cpl) はどちらも -90..90。
+		0..90 だけが書かれていれば、その角について対称に展開する
+		(V : 水平面について、H : 鉛直面について)。
+		*/
+		const int vm = (gam[0] > -EPS) && (ng > 1);            /* V を鏡映して展開 */
+		const int hm = (ncr > 1) && (craw[0] > -EPS);          /* H を鏡映して展開 */
+		const int ngx = vm ? ((2 * ng) - ((fabs(gam[0]) <= EPS) ? 1 : 0)) : ng;
+		const int ncx = (ncr == 1) ? 1 : (hm ? ((2 * ncr) - ((fabs(craw[0]) <= EPS) ? 1 : 0)) : ncr);
+		double *gx = (double *)xmalloc((size_t)ngx * sizeof(double));
+		double *cx = (ncx > 1) ? (double *)xmalloc((size_t)ncx * sizeof(double)) : NULL;
+		double *ix = (double *)xmalloc((size_t)ngx * ncx * sizeof(double));
+		int     k, m;
+		/* 角度の並び (昇順) と、元の表の番号 */
+		int    *gi = (int *)xmalloc((size_t)ngx * sizeof(int));
+		int    *ci = (int *)xmalloc((size_t)ncx * sizeof(int));
+		m = 0;
+		if (vm) {
+			for (k = ng - 1; k >= ((fabs(gam[0]) <= EPS) ? 1 : 0); k--) { gx[m] = -gam[k]; gi[m] = k; m++; }
+		}
+		for (k = 0; k < ng; k++) { gx[m] = gam[k]; gi[m] = k; m++; }
+		m = 0;
+		if (ncx > 1) {
+			if (hm) {
+				for (k = ncr - 1; k >= ((fabs(craw[0]) <= EPS) ? 1 : 0); k--) { cx[m] = -craw[k]; ci[m] = k; m++; }
+			}
+			for (k = 0; k < ncr; k++) { cx[m] = craw[k]; ci[m] = k; m++; }
+		}
+		else {
+			ci[0] = 0;
+		}
+		for (j = 0; j < ncx; j++) {
+			for (k = 0; k < ngx; k++) {
+				ix[((size_t)j * ngx) + k] = iraw[((size_t)ci[j] * ng) + gi[k]];
+			}
+		}
+		free(gi);
+		free(ci);
+		free(gam);
+		free(craw);
+		free(iraw);
+		d->ng  = ngx;
+		d->gam = gx;
+		d->nc  = ncx;
+		d->cpl = cx;
+		d->I   = ix;
+		d->lm  = photdist_normalize_ab(d);
+		return 0;
+	}
 
 	if (ncr == 1) {
 		d->nc  = 1;
@@ -403,6 +523,94 @@ int photdist_load(ppfd_t *p, const char *path, int isldt)
 	if (p->dist == NULL) { fprintf(stderr, "*** out of memory\n"); exit(1); }
 	p->dist[p->ndist] = d;
 	return p->ndist++;
+}
+
+/* 型 A / B の Î(H, V) : 表の範囲外は 0 (双線形) */
+static double photdist_value_hv(const photdist_t *d, double h, double v)
+{
+	int    ig, ic;
+	double fg, fc, i0, i1;
+
+	if ((v < d->gam[0]) || (v > d->gam[d->ng - 1])) return 0.0;
+	ig = 0;
+	while ((ig < d->ng - 2) && (v > d->gam[ig + 1])) ig++;
+	{
+		const double hh = d->gam[ig + 1] - d->gam[ig];
+		fg = (hh > EPS) ? ((v - d->gam[ig]) / hh) : 0.0;
+	}
+	if (fg < 0.0) fg = 0.0;
+	if (fg > 1.0) fg = 1.0;
+	if (d->nc <= 1) {
+		if ((h < -90.0) || (h > 90.0)) return 0.0;
+		return (d->I[ig] * (1.0 - fg)) + (d->I[ig + 1] * fg);
+	}
+	if ((h < d->cpl[0]) || (h > d->cpl[d->nc - 1])) return 0.0;
+	ic = 0;
+	while ((ic < d->nc - 2) && (h > d->cpl[ic + 1])) ic++;
+	{
+		const double hh = d->cpl[ic + 1] - d->cpl[ic];
+		fc = (hh > EPS) ? ((h - d->cpl[ic]) / hh) : 0.0;
+	}
+	if (fc < 0.0) fc = 0.0;
+	if (fc > 1.0) fc = 1.0;
+	i0 = (d->I[((size_t)ic * d->ng) + ig] * (1.0 - fg)) + (d->I[((size_t)ic * d->ng) + ig + 1] * fg);
+	i1 = (d->I[((size_t)(ic + 1) * d->ng) + ig] * (1.0 - fg)) + (d->I[((size_t)(ic + 1) * d->ng) + ig + 1] * fg);
+	return (i0 * (1.0 - fc)) + (i1 * fc);
+}
+
+/*
+光源 e の向き u (単位ベクトル) への相対光度 Î [1/sr]。
+  型 C (と EULUMDAT) : γ = 配光軸からの角、C = cx から cy へ向かう方位 - rot。
+  型 A / B : 器具の座標 x = 配光軸 (dir)、z = 「上」(+z を配光軸に直交させた
+      向き。配光軸が鉛直なら cx)、y = z x x を rot だけ配光軸まわりに回す。
+      型 A : V = 仰角 asin(z)、H = 方位角 atan2(y, x)
+      型 B : V = 横軸 y まわりの面の回転角 atan2(z, x)、H = 緯度 asin(y)
+*/
+double photdist_dir(const ppfd_t *p, const emitter_t *e, vec3_t u)
+{
+	const photdist_t *d = &p->dist[e->idist];
+
+	if ((d->ptype != 2) && (d->ptype != 3)) {
+		double cg = v_dot(u, e->dir);
+		double ca;
+		if (cg > 1.0) cg = 1.0;
+		if (cg < -1.0) cg = -1.0;
+		ca = atan2(v_dot(u, e->cy), v_dot(u, e->cx)) * (180.0 / PI) - e->crot;
+		return photdist_value(d, acos(cg) * (180.0 / PI), ca);
+	}
+	{
+		const vec3_t ex = e->dir;
+		vec3_t ez = (fabs(ex.z) < 0.99) ? v_make(0.0, 0.0, 1.0) : e->cx;
+		vec3_t ey;
+		double x, y, z, h, v;
+		const double cr = cos(e->crot * (PI / 180.0)), sr = sin(e->crot * (PI / 180.0));
+		ez = v_sub(ez, v_scale(ex, v_dot(ez, ex)));
+		ez = v_scale(ez, 1.0 / v_norm(ez));
+		ey = v_cross(ez, ex);
+		{
+			/* rot : 器具を配光軸まわりに回す */
+			const vec3_t ty = v_add(v_scale(ey, cr), v_scale(ez, sr));
+			const vec3_t tz = v_sub(v_scale(ez, cr), v_scale(ey, sr));
+			ey = ty;
+			ez = tz;
+		}
+		x = v_dot(u, ex);
+		y = v_dot(u, ey);
+		z = v_dot(u, ez);
+		if (y > 1.0) y = 1.0;
+		if (y < -1.0) y = -1.0;
+		if (z > 1.0) z = 1.0;
+		if (z < -1.0) z = -1.0;
+		if (d->ptype == 3) {
+			v = asin(z) * (180.0 / PI);
+			h = atan2(y, x) * (180.0 / PI);
+		}
+		else {
+			v = atan2(z, x) * (180.0 / PI);
+			h = asin(y) * (180.0 / PI);
+		}
+		return photdist_value_hv(d, h, v);
+	}
 }
 
 /*

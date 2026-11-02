@@ -6,11 +6,11 @@ radiosity.c
     B_i = ρ_i ( Ed_i + Σ_j F_ij τ_ij B_j )
 
 を Jacobi 反復で解く。B は放射発散度 [W/m²]、Ed は直接放射照度、
-τ_ij は群落スラブによるパッチ間の透過率 (パッチ重心どうしを結ぶ線分で
-評価する近似)。ρ_i < 1 なので反復行列のスペクトル半径は 1 未満、
+τ_ij は群落スラブによるパッチ間の透過率 (対の中の経路長の分布を 2 点
+Gauss 則に縮めたもの。formfactor.c の canopy_plen を参照)。ρ_i < 1 なので反復行列のスペクトル半径は 1 未満、
 必ず収束する。
 
-波長を外側ループにすると τ_ij の exp() が波長ごと 1 回で済み、反復の
+波長を外側ループにすると τ_ij の exp() が波長ごと 1 回 (2 点) で済み、反復の
 内側では行列積だけになる。光源の放射束が 0 のビンは丸ごと飛ばす。
 */
 
@@ -23,6 +23,7 @@ void solve_radiosity(ppfd_t *p)
 	double  *M = NULL;
 	double  *Bold, *Bnew;
 	double  *Bfull = NULL;
+	double  *ctmp = NULL;                   /* [2*nslab] 前の反復の面の流束 (収束判定) */
 	const int scat = p->canopy.on && p->canopy.scatter;
 	int      il;
 	int      itermax = 0;
@@ -38,6 +39,7 @@ void solve_radiosity(ppfd_t *p)
 	Bold = (double *)xcalloc((size_t)n, sizeof(double));
 	Bnew = (double *)xcalloc((size_t)n, sizeof(double));
 	if (scat) Bfull = (double *)xcalloc((size_t)n * nl, sizeof(double));
+	if (scat) ctmp = (double *)xcalloc((size_t)(2 * p->nslab), sizeof(double));
 
 	for (il = 0; il < nl; il++) {
 		const double *F;
@@ -54,7 +56,7 @@ void solve_radiosity(ppfd_t *p)
 		}
 		if (scat) {
 			int m;
-			for (m = 0; m < p->canopy.nlayer; m++) {
+			for (m = 0; m < p->cnl; m++) {
 				if (p->cdep[((size_t)m * nl) + il] > 0.0) active = 1;
 			}
 		}
@@ -76,8 +78,7 @@ void solve_radiosity(ppfd_t *p)
 			for (i = 0; i < n; i++) {
 				for (j = 0; j < n; j++) {
 					const size_t k = ((size_t)i * n) + j;
-					const double s = p->plen[k];
-					M[k] = (s > 0.0) ? (p->ff[k] * exp(-kext * s)) : p->ff[k];
+					M[k] = p->ff[k] * plen_trans(&p->plen[k * PLEN_N], kext);
 				}
 			}
 			/* 鏡面拡張 : 鏡像経路それぞれの経路長で減衰させて加算する */
@@ -85,15 +86,14 @@ void solve_radiosity(ppfd_t *p)
 				int t;
 				for (t = 0; t < p->nst; t++) {
 					const double *fs = &p->ffs[(size_t)t * n * n];
-					const float  *ps = &p->plens[(size_t)t * n * n];
+					const float  *ps = &p->plens[(size_t)t * n * n * PLEN_N];
 #ifdef _OPENMP
 #pragma omp parallel for private(j) schedule(static)
 #endif
 					for (i = 0; i < n; i++) {
 						for (j = 0; j < n; j++) {
 							const size_t k = ((size_t)i * n) + j;
-							const double s = ps[k];
-							M[k] += (s > 0.0) ? (fs[k] * exp(-kext * s)) : fs[k];
+							M[k] += fs[k] * plen_trans(&ps[k * PLEN_N], kext);
 						}
 					}
 				}
@@ -110,18 +110,31 @@ void solve_radiosity(ppfd_t *p)
 		}
 
 		for (iter = 0; iter < p->maxiter; iter++) {
-			double dmax = 0.0, bmax = 0.0;
-			double etop = 0.0, ebot = 0.0;
-
+			double dmax = 0.0, bmax = 0.0, cdmax = 0.0, cmax = 0.0;
 			if (scat) {
 				/*
 				群落の拡散場を現在の B から解き直す。反復行列の一部として
 				扱うので、収束すれば直接光・壁・群落が同時に整合する。
+				スラブが複数あると、向かい合う面どうしのやりとりも反復で
+				整合させるので、面の流束の変化も収束判定に入れる (壁が全部
+				黒くて B が 0 でも、スラブどうしのやりとりは反復が要る)。
 				*/
 				double aw = 0.0, sw = 0.0;
+				int    js;
+				for (js = 0; (p->nslab > 1) && (js < p->nslab); js++) {
+					ctmp[2 * js]       = p->cbtop[((size_t)js * nl) + il];
+					ctmp[(2 * js) + 1] = p->cbbot[((size_t)js * nl) + il];
+				}
 				canopy_field(p, il, Bfull, &aw, &sw);
-				etop = p->cbtop[il];
-				ebot = p->cbbot[il];
+				for (js = 0; (p->nslab > 1) && (js < p->nslab); js++) {
+					const double et = p->cbtop[((size_t)js * nl) + il];
+					const double eb = p->cbbot[((size_t)js * nl) + il];
+					const double d1 = fabs(et - ctmp[2 * js]), d2 = fabs(eb - ctmp[(2 * js) + 1]);
+					if (d1 > cdmax) cdmax = d1;
+					if (d2 > cdmax) cdmax = d2;
+					if (et > cmax) cmax = et;
+					if (eb > cmax) cmax = eb;
+				}
 			}
 
 #ifdef _OPENMP
@@ -135,7 +148,12 @@ void solve_radiosity(ppfd_t *p)
 					g += Fi[j] * Bold[j];
 				}
 				if (scat) {
-					g += (p->cffup[i] * etop) + (p->cffdn[i] * ebot);
+					int js;
+					for (js = 0; js < p->nslab; js++) {
+						const size_t ks = ((size_t)js * n) + i;
+						const size_t kl = ((size_t)js * nl) + il;
+						g += (p->cffup[ks] * p->cbtop[kl]) + (p->cffdn[ks] * p->cbbot[kl]);
+					}
 				}
 				Bnew[i] = p->mat[p->patch[i].imat].rho[il] * g;
 			}
@@ -149,6 +167,17 @@ void solve_radiosity(ppfd_t *p)
 			}
 
 			if (iter + 1 > itermax) itermax = iter + 1;
+			if (scat && (p->nslab > 1)) {
+				const double rb = (bmax > 0.0) ? (dmax / bmax) : 0.0;
+				const double rc = (cmax > 0.0) ? (cdmax / cmax) : 0.0;
+				const double r = (rb > rc) ? rb : rc;
+				if ((bmax <= 0.0) && (cmax <= 0.0)) break;
+				if ((r < p->converg) || (iter == p->maxiter - 1)) {
+					if (r > residmax) residmax = r;
+					break;
+				}
+				continue;
+			}
 			if (bmax <= 0.0) break;
 			if ((dmax / bmax) < p->converg) {
 				if ((dmax / bmax) > residmax) residmax = dmax / bmax;
@@ -177,7 +206,12 @@ void solve_radiosity(ppfd_t *p)
 				g += Fi[j] * Bold[j];
 			}
 			if (scat) {
-				g += (p->cffup[i] * p->cbtop[il]) + (p->cffdn[i] * p->cbbot[il]);
+				int js;
+				for (js = 0; js < p->nslab; js++) {
+					const size_t ks = ((size_t)js * n) + i;
+					const size_t kl = ((size_t)js * nl) + il;
+					g += (p->cffup[ks] * p->cbtop[kl]) + (p->cffdn[ks] * p->cbbot[kl]);
+				}
 			}
 			p->Einc[((size_t)i * nl) + il] = g;
 			p->B[((size_t)i * nl) + il] = p->mat[p->patch[i].imat].rho[il] * g;
@@ -190,5 +224,6 @@ void solve_radiosity(ppfd_t *p)
 	free(Bold);
 	free(Bnew);
 	if (Bfull != NULL) free(Bfull);
+	if (ctmp != NULL) free(ctmp);
 	if (M != NULL) free(M);
 }

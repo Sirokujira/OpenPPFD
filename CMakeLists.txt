@@ -34,6 +34,7 @@ add_executable(oppfd
     src/formfactor.c
     src/direct.c
     src/radiosity.c
+    src/montecarlo.c
     src/solve.c
     src/output.c
     src/utils.c

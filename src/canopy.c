@@ -203,11 +203,67 @@ int canopy_selftest(void)
 		bad += st_chk("adding : 2 x t == 1 x 2t (T)", T1 * T1 * g, T2, 1e-12);
 	}
 
+	/*
+	(7) カラムの解き方 (adding sweep) : 対称な湧き出しなら上下の流出は等しい、
+	完全反射の境界 (crbot = 1) は「鏡映して 2 倍にしたカラム」と等しい。
+	吸収を残差で数えるので収支の判定では見えない (以前の Sb の余分な
+	(1 + R Rb) はこれで見つかった)。
+	*/
+	{
+		ppfd_t   q;
+		cslab_t  sl[1];
+		double   rt[1] = { 0.0 }, rb[1] = { 0.0 };
+		double   Q[16], fdn[17], fup[17], et, eb, ab, et2, eb2, ab2;
+		int      m;
+
+		memset(&q, 0, sizeof(q));
+		memset(sl, 0, sizeof(sl));
+		sl[0].ztop = 1.0;
+		sl[0].zbot = 0.0;
+		sl[0].k0 = 0.5;
+		sl[0].a = 3.0;
+		q.slab = sl;
+		q.nslab = 1;
+		q.crtop = rt;
+		q.crbot = rb;
+
+		/* 対称な湧き出し (8 層) */
+		q.canopy.nlayer = 8;
+		for (m = 0; m < 8; m++) Q[m] = 1.0 + (0.3 * ((m < 4) ? m : (7 - m)));
+		canopy_column(&q, 0, 0.6, Q, 0.0, 0.0, fdn, fup, &et, &eb, &ab);
+		bad += st_chk("column : symmetric source -> top = bottom", et, eb, 1e-13);
+
+		/* 完全反射の下端 (4 層) = 鏡映した 8 層のカラム (厚さも 2 倍) */
+		q.canopy.nlayer = 4;
+		sl[0].ztop = 0.5;
+		rb[0] = 1.0;
+		for (m = 0; m < 4; m++) Q[m] = 1.0 + (0.5 * m);
+		canopy_column(&q, 0, 0.6, Q, 0.0, 0.0, fdn, fup, &et, &eb, &ab);
+		q.canopy.nlayer = 8;
+		sl[0].ztop = 1.0;
+		rb[0] = 0.0;
+		for (m = 0; m < 4; m++) Q[7 - m] = Q[m];
+		canopy_column(&q, 0, 0.6, Q, 0.0, 0.0, fdn, fup, &et2, &eb2, &ab2);
+		bad += st_chk("column : mirror boundary == doubled (top)", et, et2, 1e-13);
+		bad += st_chk("column : mirror boundary == doubled (abs)", 2.0 * ab, ab2, 1e-12);
+	}
+
 	printf("%s (%d failures)\n", bad ? "*** canopy self test FAILED" : "canopy self test passed", bad);
 	return bad;
 }
 
 /* 葉の散乱係数 ω = ρ + τ (クランプはここ 1 箇所に集約する) */
+/* スラブ js の葉の散乱係数 (段ごとに葉材料が違うとき。散乱モデルのみ) */
+double canopy_omega_slab(const ppfd_t *p, int js, int il)
+{
+	const pmat_t *m = &p->mat[p->slab[js].imat];
+	double omega = m->rho[il] + m->tau[il];
+
+	if (omega < 0.0) omega = 0.0;
+	if (omega > 1.0) omega = 1.0;
+	return omega;
+}
+
 double canopy_omega(const ppfd_t *p, int il)
 {
 	const pmat_t *m = &p->mat[p->canopy.imat];
@@ -233,46 +289,55 @@ double canopy_kext(const ppfd_t *p, int il)
 }
 
 /*
-線分 a→b が層 m を通る長さ [m] を seg[0..nlayer-1] に加算する。
-群落スラブの外にある部分は無視する。戻り値 = スラブ内の全長 [m]
-(= canopy_path と一致する)。
+線分 a→b が層 g を通る長さ [m] を seg[0..cnl-1] に入れる。層の通し番号は
+スラブ j (上から) の層 m (上から) で g = j * nlayer + m なので、g が増える
+向きが z の下向き。散乱モデルでないときはスラブ 0 の層だけ。群落スラブの
+外にある部分は無視する。戻り値 = スラブ内の全長 [m]。
 */
 double canopy_segments(const ppfd_t *p, vec3_t a, vec3_t b, double *seg)
 {
 	const canopy_t *c = &p->canopy;
 	const vec3_t d = v_sub(b, a);
 	const double len = v_norm(d);
-	const double dz = c->ztop - c->zbot;
+	const int ns = (c->scatter && (p->nslab > 0)) ? p->nslab : 1;
+	const int nl = c->nlayer;
 	double total = 0.0;
-	int    m;
+	int    m, j;
 
-	for (m = 0; m < c->nlayer; m++) seg[m] = 0.0;
+	for (m = 0; m < ns * nl; m++) seg[m] = 0.0;
 	if (!c->on || (len < EPS)) return 0.0;
 
-	if (fabs(d.z) < (EPS * (len + 1.0))) {
-		/* ほぼ水平な線分 : 1 つの層に丸ごと入る */
-		if ((a.z < c->zbot) || (a.z > c->ztop)) return 0.0;
-		m = (int)(((c->ztop - a.z) / dz) * c->nlayer);
-		if (m < 0) m = 0;
-		if (m > c->nlayer - 1) m = c->nlayer - 1;
-		seg[m] = len;
-		return len;
-	}
+	for (j = 0; j < ns; j++) {
+		const double ztop = (p->nslab > 0) ? p->slab[j].ztop : c->ztop;
+		const double zbot = (p->nslab > 0) ? p->slab[j].zbot : c->zbot;
+		const double dz = ztop - zbot;
+		double *sj = &seg[(size_t)j * nl];
 
-	/* 層 m は z ∈ [ztop - (m+1)h, ztop - m h] (m = 0 が最上層) */
-	for (m = 0; m < c->nlayer; m++) {
-		const double h = dz / c->nlayer;
-		const double zhi = c->ztop - (m * h);
-		const double zlo = c->ztop - ((m + 1) * h);
-		double t0 = (zlo - a.z) / d.z;
-		double t1 = (zhi - a.z) / d.z;
-		double lo = (t0 < t1) ? t0 : t1;
-		double hi = (t0 < t1) ? t1 : t0;
-		if (lo < 0.0) lo = 0.0;
-		if (hi > 1.0) hi = 1.0;
-		if (hi <= lo) continue;
-		seg[m] = (hi - lo) * len;
-		total += seg[m];
+		if (fabs(d.z) < (EPS * (len + 1.0))) {
+			/* ほぼ水平な線分 : 1 つの層に丸ごと入る */
+			if ((a.z < zbot) || (a.z > ztop)) continue;
+			m = (int)(((ztop - a.z) / dz) * nl);
+			if (m < 0) m = 0;
+			if (m > nl - 1) m = nl - 1;
+			sj[m] = len;
+			return len;
+		}
+
+		/* 層 m は z ∈ [ztop - (m+1)h, ztop - m h] (m = 0 が最上層) */
+		for (m = 0; m < nl; m++) {
+			const double h = dz / nl;
+			const double zhi = ztop - (m * h);
+			const double zlo = ztop - ((m + 1) * h);
+			double t0 = (zlo - a.z) / d.z;
+			double t1 = (zhi - a.z) / d.z;
+			double lo = (t0 < t1) ? t0 : t1;
+			double hi = (t0 < t1) ? t1 : t0;
+			if (lo < 0.0) lo = 0.0;
+			if (hi > 1.0) hi = 1.0;
+			if (hi <= lo) continue;
+			sj[m] = (hi - lo) * len;
+			total += sj[m];
+		}
 	}
 	return total;
 }
@@ -281,48 +346,301 @@ double canopy_segments(const ppfd_t *p, vec3_t a, vec3_t b, double *seg)
 線分 a→b に沿って単位放射束が層ごとに落とす「遮断割合」を dep[] に加算する。
 w は光線が運ぶ重み (放射束 [W] など)。
 
-    dep[m] += w * exp(-k s_before) * (1 - exp(-k Δs_m))
+    dep[g] += w * exp(-Σ_{前の層} k s) * (1 - exp(-k_g Δs_g))
 
-k は波長によらないので、この係数は分光ループの外で 1 回だけ作れる。
-Σ_m dep[m] + w exp(-k s_total) = w が望遠鏡和で厳密に成り立つ。
-戻り値 = 全経路の透過率 exp(-k s_total)。
+k_g = G_j a_j (層 g が属するスラブ j の素の遮断) は波長によらないので、
+この係数は分光ループの外で 1 回だけ作れる。
+Σ_g dep[g] + w exp(-Σ k s) = w が望遠鏡和で厳密に成り立つ。
+光線は z について単調なので、通る順は g の昇順 (下向き) か降順 (上向き)。
+戻り値 = 全経路の透過率。
 */
-double canopy_deposit(const ppfd_t *p, vec3_t a, vec3_t b, double w, double *dep, double *seg)
+static double deposit_straight(const ppfd_t *p, vec3_t a, vec3_t b, double w, double *dep, double *seg)
 {
 	const canopy_t *c = &p->canopy;
-	const double k = c->k0 * c->a;
+	const int ns = (c->scatter && (p->nslab > 0)) ? p->nslab : 1;
+	const int nl = c->nlayer;
 	double tr = 1.0;
-	int    m;
+	int    g;
 
 	if (canopy_segments(p, a, b, seg) <= 0.0) return 1.0;
 
 	/* a に近い層から順に処理する (光線の向きで層の順序が変わる) */
 	if (b.z <= a.z) {
-		for (m = 0; m < c->nlayer; m++) {
-			const double e = exp(-k * seg[m]);
-			dep[m] += w * tr * (1.0 - e);
+		for (g = 0; g < ns * nl; g++) {
+			const cslab_t *sl = &p->slab[g / nl];
+			const double k = (p->nslab > 0) ? (sl->k0 * sl->a) : (c->k0 * c->a);
+			const double e = exp(-k * seg[g]);
+			dep[g] += w * tr * (1.0 - e);
 			tr *= e;
 		}
 	}
 	else {
-		for (m = c->nlayer - 1; m >= 0; m--) {
-			const double e = exp(-k * seg[m]);
-			dep[m] += w * tr * (1.0 - e);
+		for (g = (ns * nl) - 1; g >= 0; g--) {
+			const cslab_t *sl = &p->slab[g / nl];
+			const double k = (p->nslab > 0) ? (sl->k0 * sl->a) : (c->k0 * c->a);
+			const double e = exp(-k * seg[g]);
+			dep[g] += w * tr * (1.0 - e);
 			tr *= e;
 		}
 	}
 	return tr;
 }
 
-/* 群落の上面 (iz = 1) / 下面 (iz = 0) の矩形 */
-static void canopy_plane(const ppfd_t *p, int istop, vec3_t *poly)
+/*
+床・天井が鏡面のとき、箱の外へ出る線分は鏡像への直線 (展開した経路)。
+実経路は z = k Lz の平面で折り返すたびに層を通る順序が入れ替わる (下りの
+あとに上り) ので、線分をその平面で区切り、区間ごとに z を三角波 fold_z で
+実チャンバへ戻してから、経路に沿った順に預ける (透過率は区間をまたいで
+掛け継ぐ)。鏡映は弧長を保ち、各区間の中で実経路の z は単調なので、これで
+展開しない実経路を 1 本ずつたどったのと同じ預け入れになる。
+床・天井が鏡面でない、または線分が箱の中に収まるなら従来どおり 1 区間。
+*/
+/*
+栽培ベッド (範囲を限ったスラブ) があるときの預け入れ。光線は横にも動くので、
+層の順序は z だけでは決まらない (ベッド A の上の層を抜けて通路を横切り、
+ベッド B の下の層へ入る、など)。そこでスラブ・層・(鏡面の軸の) 複製ごとに
+光線が箱の中にある区間 [t0, t1] を集め、t の順に並べて透過率を掛け継ぐ。
+区間どうしは空間的に重ならないので順序は一意。
+*/
+#define BED_MAXSEG 2048
+static double deposit_beds(const ppfd_t *p, vec3_t a, vec3_t b, double w, double *dep)
 {
-	const double z = istop ? p->canopy.ztop : p->canopy.zbot;
+	const canopy_t *c = &p->canopy;
+	const int nl = c->nlayer;
+	const double len = v_norm(v_sub(b, a));
+	double t0[BED_MAXSEG], t1[BED_MAXSEG], tr = 1.0;
+	int    gi[BED_MAXSEG];
+	int    n = 0, j, m, i, k;
 
-	poly[0] = v_make(0.0,    0.0,    z);
-	poly[1] = v_make(p->Lx,  0.0,    z);
-	poly[2] = v_make(p->Lx,  p->Ly,  z);
-	poly[3] = v_make(0.0,    p->Ly,  z);
+	for (j = 0; j < p->nslab; j++) {
+		const cslab_t *sl = &p->slab[j];
+		const double h = (sl->ztop - sl->zbot) / nl;
+		for (m = 0; m < nl; m++) {
+			double u0[64], u1[64];
+			const int ni = canopy_box_intervals(p, sl->x0, sl->x1, sl->y0, sl->y1,
+			                                    sl->ztop - ((m + 1) * h), sl->ztop - (m * h), a, b, u0, u1, 64);
+			for (k = 0; (k < ni) && (n < BED_MAXSEG); k++) {
+				t0[n] = u0[k];
+				t1[n] = u1[k];
+				gi[n] = (j * nl) + m;
+				n++;
+			}
+		}
+	}
+	/* t0 の昇順 (挿入ソート。区間の数は普通は数個) */
+	for (i = 1; i < n; i++) {
+		const double s0 = t0[i], s1 = t1[i];
+		const int    g = gi[i];
+		k = i - 1;
+		while ((k >= 0) && (t0[k] > s0)) {
+			t0[k + 1] = t0[k];
+			t1[k + 1] = t1[k];
+			gi[k + 1] = gi[k];
+			k--;
+		}
+		t0[k + 1] = s0;
+		t1[k + 1] = s1;
+		gi[k + 1] = g;
+	}
+	for (i = 0; i < n; i++) {
+		const cslab_t *sl = &p->slab[gi[i] / nl];
+		const double e = exp(-(sl->k0 * sl->a) * ((t1[i] - t0[i]) * len));
+		dep[gi[i]] += w * tr * (1.0 - e);
+		tr *= e;
+	}
+	return tr;
+}
+
+double canopy_deposit(const ppfd_t *p, vec3_t a, vec3_t b, double w, double *dep, double *seg)
+{
+	const int zmir = (p->mat[p->wallmat[4]].rhos > 0.0) || (p->mat[p->wallmat[5]].rhos > 0.0);
+	const vec3_t d = v_sub(b, a);
+	double tcut[66];
+	double tr = 1.0;
+	int    nc = 0, k, k0, k1, i;
+
+	if (p->cbeds) return deposit_beds(p, a, b, w, dep);   /* ベッドは床・天井の鏡面と併用しない */
+	if (!zmir || ((a.z >= 0.0) && (a.z <= p->Lz) && (b.z >= 0.0) && (b.z <= p->Lz))) {
+		return deposit_straight(p, a, b, w, dep, seg);
+	}
+
+	/* 折り返しの平面 z = k Lz で区切る (区間の端の t を昇順に並べる) */
+	tcut[nc++] = 0.0;
+	if (fabs(d.z) > 0.0) {
+		const double zlo = (a.z < b.z) ? a.z : b.z;
+		const double zhi = (a.z < b.z) ? b.z : a.z;
+		k0 = (int)floor(zlo / p->Lz) + 1;
+		k1 = (int)ceil(zhi / p->Lz) - 1;
+		for (k = k0; (k <= k1) && (nc < 65); k++) {
+			const double t = ((k * p->Lz) - a.z) / d.z;
+			if ((t > 0.0) && (t < 1.0)) tcut[nc++] = t;
+		}
+		/* d.z < 0 なら t は降順に積まれているので並べ直す (挿入ソート) */
+		for (i = 1; i < nc; i++) {
+			const double t = tcut[i];
+			int j = i - 1;
+			while ((j >= 0) && (tcut[j] > t)) { tcut[j + 1] = tcut[j]; j--; }
+			tcut[j + 1] = t;
+		}
+	}
+	tcut[nc++] = 1.0;
+
+	for (i = 0; i + 1 < nc; i++) {
+		const vec3_t u = v_add(a, v_scale(d, tcut[i]));
+		const vec3_t v = v_add(a, v_scale(d, tcut[i + 1]));
+		const vec3_t ur = v_make(u.x, u.y, fold_z(p, u.z));
+		const vec3_t vr = v_make(v.x, v.y, fold_z(p, v.z));
+		tr *= deposit_straight(p, ur, vr, w * tr, dep, seg);
+	}
+	return tr;
+}
+
+/*
+2 点則で持った経路長 pl = (s1, s2, w1) の透過率 (canopy_plen を参照)。
+s2 = 0 なら群落を通らない (減衰なし)。
+*/
+double plen_trans(const float *pl, double k)
+{
+	const double w1 = pl[2];
+
+	if (pl[1] <= 0.0f) return 1.0;
+	if (w1 >= 1.0) return exp(-k * pl[0]);
+	return (w1 * exp(-k * pl[0])) + ((1.0 - w1) * exp(-k * pl[1]));
+}
+
+/* スラブ j の上面 (istop = 1) / 下面 (istop = 0) の矩形 */
+static void canopy_plane(const ppfd_t *p, int j, int istop, vec3_t *poly)
+{
+	const cslab_t *sl = &p->slab[j];
+	const double z = istop ? sl->ztop : sl->zbot;
+
+	/* 断面全体なら x0 = 0, x1 = Lx (従来の矩形とビット一致) */
+	poly[0] = v_make(sl->x0, sl->y0, z);
+	poly[1] = v_make(sl->x1, sl->y0, z);
+	poly[2] = v_make(sl->x1, sl->y1, z);
+	poly[3] = v_make(sl->x0, sl->y1, z);
+}
+
+/* スラブの床面積 (栽培ベッドならベッドの範囲) */
+static double slab_area(const cslab_t *sl)
+{
+	return (sl->x1 - sl->x0) * (sl->y1 - sl->y0);
+}
+
+/*
+群落スラブ sl の上面 (side = 1) / 下面 (side = 0) が乗っている面のパッチ q が、
+面と重なる割合 (q の面積に対する比)。q が面と同一平面で向かい合っていなければ
+0。q がベッドの範囲に丸ごと入るなら厳密に 1 (断面全体のスラブが床に乗る従来の
+場合と 1 ビットも変わらない)。
+*/
+static double rest_frac(const patch_t *q, const cslab_t *sl, int side, double tol)
+{
+	const double zf = side ? sl->ztop : sl->zbot;
+	const double nzw = side ? -1.0 : 1.0;
+	double xmin = q->p[0].x, xmax = q->p[0].x, ymin = q->p[0].y, ymax = q->p[0].y;
+	int    v;
+
+	if ((fabs(q->n.z - nzw) > 1e-9) || (fabs(q->c.z - zf) > tol) || (q->area <= 0.0)) return 0.0;
+	for (v = 1; v < 4; v++) {
+		if (q->p[v].x < xmin) xmin = q->p[v].x;
+		if (q->p[v].x > xmax) xmax = q->p[v].x;
+		if (q->p[v].y < ymin) ymin = q->p[v].y;
+		if (q->p[v].y > ymax) ymax = q->p[v].y;
+	}
+	if ((xmax <= sl->x0) || (xmin >= sl->x1) || (ymax <= sl->y0) || (ymin >= sl->y1)) return 0.0;
+	if ((xmin >= sl->x0) && (xmax <= sl->x1) && (ymin >= sl->y0) && (ymax <= sl->y1)) return 1.0;
+	return poly_rect_area(q->p, 4, sl->x0, sl->x1, sl->y0, sl->y1) / q->area;
+}
+
+/*
+群落の上面 / 下面 (またはその鏡像) の多角形 poly4 への、パッチ q からの
+形態係数。半空間 gn·(x - gp) > 0 にある求積点だけが見る (gn が零ベクトル
+なら判定しない)。
+tn は面が鏡像のときの展開指数 (実在なら NULL)。
+
+遮蔽物が無ければ従来どおり多角形 1 枚の閉形式。遮蔽物があるときは、
+面を patchdiv の格子の小矩形に割って、小矩形ごとの閉形式の形態係数に
+可視率 (vis_patch_patch) を掛けて足す。面は断面全体の大きな多角形なので、
+ここで可視率を見ないと棚板の向こうのパッチにも群落の散乱光が届いてしまう
+(断面いっぱいの棚板の上の測定面に光が漏れていた)。
+*/
+static double plane_ff(const ppfd_t *p, const patch_t *q, const vec3_t *poly4, vec3_t gp,
+                       vec3_t gn, const vec3_t *g2, const int *tn)
+{
+	const int nu = p->ndivu, nv = p->ndivv;
+	const vec3_t eu = v_sub(poly4[1], poly4[0]);
+	const vec3_t ev = v_sub(poly4[3], poly4[0]);
+	double f = 0.0;
+	int    iu, iv, v;
+
+	/*
+	g2 (NULL でなければ g2[0] = 点, g2[1] = 法線) : 2 枚目の半空間。そちらに
+	入る求積点 (隣のスラブより向こう) は見ないので差し引く。同じ求積点の
+	部分和なので、向こうに丸ごと入るパッチは厳密に 0 になる。
+	*/
+	if (!occ_any(p)) {
+		f = ff_patch_poly(q, poly4, 4, 4, gp, gn);
+		if (g2 != NULL) f -= ff_patch_poly(q, poly4, 4, 4, g2[0], g2[1]);
+		return (f > 0.0) ? f : 0.0;
+	}
+
+	for (iv = 0; iv < nv; iv++) {
+		for (iu = 0; iu < nu; iu++) {
+			patch_t sub;
+			double  fs;
+			sub.p[0] = v_add(poly4[0], v_add(v_scale(eu, (double)iu / nu), v_scale(ev, (double)iv / nv)));
+			sub.p[1] = v_add(sub.p[0], v_scale(eu, 1.0 / nu));
+			sub.p[2] = v_add(sub.p[1], v_scale(ev, 1.0 / nv));
+			sub.p[3] = v_add(sub.p[0], v_scale(ev, 1.0 / nv));
+			fs = ff_patch_poly(q, sub.p, 4, 4, gp, gn);
+			if (g2 != NULL) fs -= ff_patch_poly(q, sub.p, 4, 4, g2[0], g2[1]);
+			if (fs <= 0.0) continue;
+			sub.n = gn;
+			sub.c = v_make(0.0, 0.0, 0.0);
+			for (v = 0; v < 4; v++) sub.c = v_add(sub.c, v_scale(sub.p[v], 0.25));
+			sub.area = 0.0;
+			sub.imat = 0;
+			sub.iface = -1;
+			f += fs * vis_patch_patch(p, q, &sub, tn, NULL);
+		}
+	}
+	return f;
+}
+
+/*
+測定面の点 x (法線 nz) から群落の上面 / 下面 (またはその鏡像) への形態係数。
+遮蔽物があれば plane_ff と同じく小矩形ごとに可視率を掛ける。
+*/
+double canopy_plane_ff_point(const ppfd_t *p, vec3_t x, vec3_t nz, const vec3_t *poly4, const int *tn)
+{
+	const int nu = p->ndivu, nv = p->ndivv;
+	const vec3_t eu = v_sub(poly4[1], poly4[0]);
+	const vec3_t ev = v_sub(poly4[3], poly4[0]);
+	double f = 0.0;
+	int    iu, iv, v;
+
+	if (!occ_any(p)) return ff_point_poly(x, nz, poly4, 4);
+
+	for (iv = 0; iv < nv; iv++) {
+		for (iu = 0; iu < nu; iu++) {
+			patch_t sub;
+			double  fs;
+			sub.p[0] = v_add(poly4[0], v_add(v_scale(eu, (double)iu / nu), v_scale(ev, (double)iv / nv)));
+			sub.p[1] = v_add(sub.p[0], v_scale(eu, 1.0 / nu));
+			sub.p[2] = v_add(sub.p[1], v_scale(ev, 1.0 / nv));
+			sub.p[3] = v_add(sub.p[0], v_scale(ev, 1.0 / nv));
+			fs = ff_point_poly(x, nz, sub.p, 4);
+			if (fs <= 0.0) continue;
+			sub.n = v_make(0.0, 0.0, 0.0);
+			sub.c = v_make(0.0, 0.0, 0.0);
+			for (v = 0; v < 4; v++) sub.c = v_add(sub.c, v_scale(sub.p[v], 0.25));
+			sub.area = 0.0;
+			sub.imat = 0;
+			sub.iface = -1;
+			f += fs * vis_point_patch(p, x, &sub, tn, NULL);
+		}
+	}
+	return f;
 }
 
 /*
@@ -339,53 +657,314 @@ static void canopy_plane(const ppfd_t *p, int istop, vec3_t *poly)
 
   cdepw[i][m] : パッチ i の放射発散度 1 単位あたり、層 m へ預けられる
       放射束 [m²]。A_i Σ_j F_ij (i→j の経路が層 m で落とす割合)。
+      i→j の経路は setup_ff が透過率を作ったのと同じ標本 (canopy_pair_samples)
+      で運ぶので、対ごとに「透過 + 各層への預け入れ = 1」が成り立つ。
       素の遮断 k = G a は波長によらないので、この係数は 1 回作れば足りる。
+
+■ 側壁の鏡面との併用
+側壁 (x/y 面) の鏡映は z を保つので、鏡像への直線の z プロファイルは
+実経路のものと同じで、層への預け入れはそのまま展開した直線で測れる。
+帳簿は「光線は止まった所で預ける」に揃える :
+
+  - 鏡面のパッチ j に届いた光のうち、止まる (吸収または拡散反射) のは
+    (1 - ρs_j) の分。ρs_j の分は j の鏡像を通る拡張形態係数の経路が
+    展開した全経路で運び、預け入れもそちらで数える。そこで i → j の
+    預け入れは (1 - ρs_j) 倍する (直接光の光線も同じ。direct.c)。
+    鏡面が無ければ係数は厳密に 1。
+  - 群落の上下面から出た放射も鏡面で折り返す : 面の鏡像への形態係数を
+    Π ρs の重みで足す。面から出た放射束が過不足なく止まるよう
+    Σ_i A_i (1 - ρs_i) Σ_t w_t F(i → T_t(面)) = A_c へ正規化する。
+    鏡面が無ければ従来の Σ_i A_i F_i = A_c そのもの。
+
+完全鏡面 (ρs = 1) ならこれは「鏡映した幾何を実在させた二重箱」の帳簿と
+項ごとに一致する (鏡面のパッチは何も預けず、鏡像経路が全経路を運ぶ)。
+床・天井の鏡面は層の順序を入れ替える (預け入れの順序が折り返す) ので
+併用させない (入力段で弾く)。
 */
 void canopy_setup(ppfd_t *p)
 {
 	const canopy_t *c = &p->canopy;
 	const int n = p->npatch;
-	const int nl = c->nlayer;
-	vec3_t ptop[4], pbot[4];
-	double sup = 0.0, sdn = 0.0;
-	int    i, m;
+	const int nsl = p->nslab;
+	const int nl = nsl * c->nlayer;          /* 全スラブの層の通し数 */
+	strans_t *tr;
+	int    nt;
+	int    i, m, js;
 
+	p->cnl   = nl;
 	p->carea = p->Lx * p->Ly;
-	p->cffup = (double *)xcalloc((size_t)n, sizeof(double));
-	p->cffdn = (double *)xcalloc((size_t)n, sizeof(double));
+	p->cffup = (double *)xcalloc((size_t)nsl * n, sizeof(double));
+	p->cffdn = (double *)xcalloc((size_t)nsl * n, sizeof(double));
 	p->cdepw = (double *)xcalloc((size_t)n * nl, sizeof(double));
 	p->cdep  = (double *)xcalloc((size_t)nl * p->nlam, sizeof(double));
-	p->cfdn  = (double *)xcalloc((size_t)(nl + 1) * p->nlam, sizeof(double));
-	p->cfup  = (double *)xcalloc((size_t)(nl + 1) * p->nlam, sizeof(double));
-	p->cbtop = (double *)xcalloc((size_t)p->nlam, sizeof(double));
-	p->cbbot = (double *)xcalloc((size_t)p->nlam, sizeof(double));
+	p->cfdn  = (double *)xcalloc((size_t)nsl * (c->nlayer + 1) * p->nlam, sizeof(double));
+	p->cfup  = (double *)xcalloc((size_t)nsl * (c->nlayer + 1) * p->nlam, sizeof(double));
+	p->cbtop = (double *)xcalloc((size_t)nsl * p->nlam, sizeof(double));
+	p->cbbot = (double *)xcalloc((size_t)nsl * p->nlam, sizeof(double));
 	p->cabs  = (double *)xcalloc((size_t)p->nlam, sizeof(double));
+	p->cnorm_up = (double *)xcalloc((size_t)nsl, sizeof(double));
+	p->cnorm_dn = (double *)xcalloc((size_t)nsl, sizeof(double));
+	p->crtop = (double *)xcalloc((size_t)nsl, sizeof(double));
+	p->crbot = (double *)xcalloc((size_t)nsl, sizeof(double));
+	p->cxup  = (double *)xcalloc((size_t)nsl, sizeof(double));
+	p->cxdn  = (double *)xcalloc((size_t)nsl, sizeof(double));
 
-	canopy_plane(p, 1, ptop);
-	canopy_plane(p, 0, pbot);
+	tr = (strans_t *)xmalloc((size_t)MAXSPECT * sizeof(strans_t));
+	nt = spec_transforms(p, tr, MAXSPECT);
 
-	p->cnburied = 0;
-	for (i = 0; i < n; i++) {
-		const patch_t *q = &p->patch[i];
-		/* 上面は「群落より上」の求積点だけ、下面は「群落より下」だけが見る */
-		p->cffup[i] = ff_patch_poly(q, ptop, 4, 4, ptop[0], v_make(0, 0, 1));
-		p->cffdn[i] = ff_patch_poly(q, pbot, 4, 4, pbot[0], v_make(0, 0, -1));
-		sup += q->area * p->cffup[i];
-		sdn += q->area * p->cffdn[i];
-		if ((p->cffup[i] <= 0.0) && (p->cffdn[i] <= 0.0)
-		 && (q->c.z < c->ztop) && (q->c.z > c->zbot)) {
-			p->cnburied++;
+	/*
+	段 (tier) の隣接 : 面どうしで拡散光をやりとりするのは、隣り合う段が
+	どちらも断面全体のスラブ 1 枚のときだけ (cnup / cndn)。栽培ベッドの段は
+	隣の段との間に棚板がある (入力段で要求) のでやりとりは 0。
+	*/
+	p->cnup = (int *)xmalloc((size_t)nsl * sizeof(int));
+	p->cndn = (int *)xmalloc((size_t)nsl * sizeof(int));
+	p->cbeds = 0;
+	for (js = 0; js < nsl; js++) {
+		int k, cnt = 0;
+		p->cnup[js] = -1;
+		p->cndn[js] = -1;
+		for (k = 0; k < nsl; k++) {
+			if (p->slab[k].tier == p->slab[js].tier) cnt++;
+		}
+		if ((cnt > 1) || !p->slab[js].full) p->cbeds = 1;
+	}
+	for (js = 0; js < nsl; js++) {
+		int k;
+		for (k = 0; k < nsl; k++) {
+			const int single_js = p->slab[js].full, single_k = p->slab[k].full;
+			if (!single_js || !single_k) continue;
+			if (p->slab[k].tier == p->slab[js].tier - 1) p->cnup[js] = k;
+			if (p->slab[k].tier == p->slab[js].tier + 1) p->cndn[js] = k;
 		}
 	}
 
-	/* 面から出た放射束を過不足なく配るための正規化 */
-	p->cnorm_up = (p->carea > 0.0) ? (sup / p->carea) : 0.0;
-	p->cnorm_dn = (p->carea > 0.0) ? (sdn / p->carea) : 0.0;
-	if (sup > EPS) {
-		for (i = 0; i < n; i++) p->cffup[i] *= p->carea / sup;
+	/*
+	隣り合うスラブの向かい合う面どうしの交換 (棚板が無い多段)。スラブ js の
+	下面から出た放射のうち、スラブ js+1 の上面へそのまま届く割合 (側壁の
+	鏡面で折り返す経路も)。面積が等しいので逆向きも同じ値。2 つの面の間に
+	あるパッチ (すき間の側壁など) と遮蔽物は形態係数と可視率で効く。面が
+	接していれば 1。届いた光は相手のカラムの境界からの拡散入射になる。
+	*/
+	for (js = 0; js < nsl; js++) {
+		const double tol = 1e-9 * p->Lz;
+		const vec3_t zero = v_make(0.0, 0.0, 0.0);
+		const int jd = p->cndn[js];
+		const double ac = slab_area(&p->slab[js]);
+		vec3_t pb[4], pt[4];
+		double cx = 0.0;
+		if (jd < 0) continue;
+		canopy_plane(p, js, 0, pb);
+		canopy_plane(p, jd, 1, pt);
+		if (p->slab[js].restbot || p->slab[jd].resttop) {
+			/* どちらかの面が棚板に乗っていれば、面は棚板の向こうを見ない */
+			cx = 0.0;
+		}
+		else if (p->slab[js].zbot - p->slab[jd].ztop <= tol) {
+			cx = 1.0;
+		}
+		else {
+			const int nu = p->ndivu, nv = p->ndivv;
+			const vec3_t eu = v_sub(pb[1], pb[0]);
+			const vec3_t ev = v_sub(pb[3], pb[0]);
+			int iu, iv, t, v;
+			for (iv = 0; iv < nv; iv++) {
+				for (iu = 0; iu < nu; iu++) {
+					patch_t sub;
+					sub.p[0] = v_add(pb[0], v_add(v_scale(eu, (double)iu / nu), v_scale(ev, (double)iv / nv)));
+					sub.p[3] = v_add(sub.p[0], v_scale(eu, 1.0 / nu));
+					sub.p[2] = v_add(sub.p[3], v_scale(ev, 1.0 / nv));
+					sub.p[1] = v_add(sub.p[0], v_scale(ev, 1.0 / nv));
+					sub.n = v_make(0.0, 0.0, -1.0);
+					sub.c = v_make(0.0, 0.0, 0.0);
+					for (v = 0; v < 4; v++) sub.c = v_add(sub.c, v_scale(sub.p[v], 0.25));
+					sub.area = ac / (nu * nv);
+					sub.imat = 0;
+					sub.iface = -1;
+					cx += (sub.area / ac) * plane_ff(p, &sub, pt, zero, zero, NULL, NULL);
+					for (t = 0; t < nt; t++) {
+						vec3_t im[4];
+						if (tr[t].n[2] != 0) continue;
+						for (v = 0; v < 4; v++) im[v] = spec_apply(p, &tr[t], pt[v]);
+						cx += (sub.area / ac) * tr[t].w * plane_ff(p, &sub, im, zero, zero, NULL, tr[t].n);
+					}
+				}
+			}
+		}
+		p->cxdn[js] = cx;           /* 正規化の前の値 (下で面ごとに縮める) */
+		p->cxup[jd] = cx;
 	}
-	if (sdn > EPS) {
-		for (i = 0; i < n; i++) p->cffdn[i] *= p->carea / sdn;
+
+	p->cnburied = 0;
+	for (js = 0; js < nsl; js++) {
+		const cslab_t *sl = &p->slab[js];
+		double *fu = &p->cffup[(size_t)js * n];
+		double *fd = &p->cffdn[(size_t)js * n];
+		const vec3_t gup = v_make(0.0, 0.0, 1.0), gdn = v_make(0.0, 0.0, -1.0);
+		const vec3_t zero = v_make(0.0, 0.0, 0.0);
+		const double tol = 1e-9 * p->Lz;
+		/*
+		面が何かに乗っている (面と同一平面で向かい合うパッチが面を覆う : 床・
+		天井・棚板の面・水平な板)。面から出る放射はそのパッチが重なりの割合で
+		そのまま受け、面はほかのどこからも見えない (入力段で全部覆うことを
+		確かめてある)。onwall は面がチャンバの壁に乗っている場合 (鏡面の
+		床・天井なら ρs の分が同じ面へ戻る)。
+		*/
+		const int ontop = sl->resttop, onbot = sl->restbot;
+		const int onwtop = (sl->ztop >= p->Lz - tol), onwbot = (sl->zbot <= tol);
+		/*
+		面を見るのは、隣のスラブの手前までのパッチ (向こうは隣のスラブの面が
+		断面全体をふさぐ)。上面の向こう = 上のスラブの下面より上、下面の向こう
+		= 下のスラブの上面より下。
+		*/
+		const double ac = slab_area(sl);
+		int    hasup = 0, hasdn = 0, k;
+		double zup = 0.0, zdn = 0.0;
+		vec3_t gtop2[2], gbot2[2];
+		vec3_t ptop[4], pbot[4];
+		double sup = 0.0, sdn = 0.0, rtop = 0.0, rbot = 0.0;
+
+		/* 上 / 下の段 (同じ段のベッドどうしは同じ高さなので互いの面を見ない) */
+		for (k = 0; k < nsl; k++) {
+			if (p->slab[k].tier == sl->tier - 1) { hasup = 1; zup = p->slab[k].zbot; }
+			if (p->slab[k].tier == sl->tier + 1) { hasdn = 1; zdn = p->slab[k].ztop; }
+		}
+		gtop2[0] = v_make(0.0, 0.0, zup);
+		gtop2[1] = gup;
+		gbot2[0] = v_make(0.0, 0.0, zdn);
+		gbot2[1] = gdn;
+		canopy_plane(p, js, 1, ptop);
+		canopy_plane(p, js, 0, pbot);
+		for (i = 0; i < n; i++) {
+			const patch_t *q = &p->patch[i];
+			/* 止まる割合 (鏡面のパッチでは正反射の分は先へ運ばれる) */
+			const double stop = 1.0 - p->mat[q->imat].rhos;
+			int t, v;
+			/* 上面は「群落より上」の求積点だけ、下面は「群落より下」だけが見る */
+			fu[i] = ontop ? 0.0 : plane_ff(p, q, ptop, ptop[0], gup, hasup ? gtop2 : NULL, NULL);
+			fd[i] = onbot ? 0.0 : plane_ff(p, q, pbot, pbot[0], gdn, hasdn ? gbot2 : NULL, NULL);
+			/*
+			鏡面で折り返して見える上下面 (面の鏡像)。側壁の鏡映 (n2 = 0) は
+			z を保つ。最上段の上面は天井で 1 回だけ (n2 = +1)、最下段の下面は
+			床で 1 回だけ (n2 = -1) 折り返した経路まで : それより先は必ず自分の
+			面を通って群落へ戻る (それは境界の反射率 crtop / crbot が運ぶ)。
+			途中の段の面から天井・床へ向かう光は、先に隣のスラブへ入る。
+			*/
+			for (t = 0; t < nt; t++) {
+				vec3_t it[4], ib[4];
+				for (v = 0; v < 4; v++) {
+					it[v] = spec_apply(p, &tr[t], ptop[v]);
+					ib[v] = spec_apply(p, &tr[t], pbot[v]);
+				}
+				if (!ontop && ((tr[t].n[2] == 0) || ((tr[t].n[2] == 1) && !hasup))) {
+					fu[i] += tr[t].w * plane_ff(p, q, it, ptop[0], gup, hasup ? gtop2 : NULL, tr[t].n);
+				}
+				if (!onbot && ((tr[t].n[2] == 0) || ((tr[t].n[2] == -1) && !hasdn))) {
+					fd[i] += tr[t].w * plane_ff(p, q, ib, pbot[0], gdn, hasdn ? gbot2 : NULL, tr[t].n);
+				}
+			}
+			/* 面が乗っている面のパッチは、重なる部分で面の放射をそのまま受ける */
+			if (ontop) fu[i] = rest_frac(q, sl, 1, tol);
+			if (onbot) fd[i] = rest_frac(q, sl, 0, tol);
+			/* 接して覆われたパッチ (床に寝かせた板の下の床など) は面を見ない */
+			if (p->pcov[i]) {
+				fu[i] = 0.0;
+				fd[i] = 0.0;
+			}
+			sup += (q->area * stop) * fu[i];
+			sdn += (q->area * stop) * fd[i];
+			if ((fu[i] <= 0.0) && (fd[i] <= 0.0)
+			 && (q->c.z < sl->ztop) && (q->c.z > sl->zbot)) {
+				p->cnburied++;
+			}
+		}
+
+		/*
+		境界の反射率 : 面から出た放射のうち、床・天井の鏡面で折り返して
+		そのまま同じ面へ戻る割合。戻った光は二流の境界からの拡散入射として
+		カラムへ入る (canopy_column)。面を小矩形の受光面に割って、面の鏡像
+		(n2 = +1 / -1、側壁の鏡映との合成も) への形態係数を足す。面が鏡面の
+		壁に乗っているなら、出た光はただちにその壁で正反射して戻る (ρs)。
+		*/
+		{
+			const int nu = p->ndivu, nv = p->ndivv;
+			int iu, iv, t, v, side;
+			for (side = 0; side < 2; side++) {
+				const vec3_t *pl = (side == 0) ? ptop : pbot;
+				const int want = (side == 0) ? 1 : -1;
+				const int onw = (side == 0) ? ontop : onbot;
+				const int onwall = (side == 0) ? onwtop : onwbot;
+				const double rsw = p->mat[p->wallmat[(side == 0) ? 5 : 4]].rhos;
+				/* 同じ面へ戻るのは最上段の上面 / 最下段の下面だけ */
+				const int outer = (side == 0) ? !hasup : !hasdn;
+				double r = 0.0;
+				if (!outer) {
+					r = 0.0;
+				}
+				else if (onw) {
+					/* 棚板・板の鏡面は入力段で弾くので、戻るのは鏡面の床・天井だけ */
+					r = onwall ? rsw : 0.0;
+				}
+				else if (rsw > 0.0) {
+					const vec3_t eu = v_sub(pl[1], pl[0]);
+					const vec3_t ev = v_sub(pl[3], pl[0]);
+					for (iv = 0; iv < nv; iv++) {
+						for (iu = 0; iu < nu; iu++) {
+							patch_t sub;
+							sub.p[0] = v_add(pl[0], v_add(v_scale(eu, (double)iu / nu), v_scale(ev, (double)iv / nv)));
+							sub.p[1] = v_add(sub.p[0], v_scale(eu, 1.0 / nu));
+							sub.p[2] = v_add(sub.p[1], v_scale(ev, 1.0 / nv));
+							sub.p[3] = v_add(sub.p[0], v_scale(ev, 1.0 / nv));
+							if (side == 1) {
+								/* 下面の受光面は下向き (頂点の順を逆にして法線を -z に) */
+								const vec3_t tmp = sub.p[1];
+								sub.p[1] = sub.p[3];
+								sub.p[3] = tmp;
+							}
+							sub.n = (side == 0) ? gup : gdn;
+							sub.c = v_make(0.0, 0.0, 0.0);
+							for (v = 0; v < 4; v++) sub.c = v_add(sub.c, v_scale(sub.p[v], 0.25));
+							sub.area = ac / (nu * nv);
+							sub.imat = 0;
+							sub.iface = -1;
+							for (t = 0; t < nt; t++) {
+								vec3_t im[4];
+								if (tr[t].n[2] != want) continue;
+								for (v = 0; v < 4; v++) im[v] = spec_apply(p, &tr[t], pl[v]);
+								r += (sub.area / ac) * tr[t].w * plane_ff(p, &sub, im, zero, zero, NULL, tr[t].n);
+							}
+						}
+					}
+				}
+				if (side == 0) rtop = r;
+				else           rbot = r;
+			}
+		}
+
+		/*
+		面から出た放射束を過不足なく配るための正規化 : 止まる分 (パッチ) と
+		戻る分 (境界の反射) の和が A_c になるようにそろえて縮める。鏡面の
+		床・天井が無ければ戻る分は 0 で、従来の Σ_i A_i F_i = A_c そのもの。
+		*/
+		sup += ac * rtop;
+		sdn += ac * rbot;
+		/* 隣のスラブの面へ届く分も「止まる」側に数える (相手のカラムが受ける) */
+		if (hasup) sup += ac * p->cxup[js];
+		if (hasdn) sdn += ac * p->cxdn[js];
+		p->cnorm_up[js] = (ac > 0.0) ? (sup / ac) : 0.0;
+		p->cnorm_dn[js] = (ac > 0.0) ? (sdn / ac) : 0.0;
+		if (sup > EPS) {
+			for (i = 0; i < n; i++) fu[i] *= ac / sup;
+			rtop *= ac / sup;
+			if (hasup) p->cxup[js] *= ac / sup;
+		}
+		if (sdn > EPS) {
+			for (i = 0; i < n; i++) fd[i] *= ac / sdn;
+			rbot *= ac / sdn;
+			if (hasdn) p->cxdn[js] *= ac / sdn;
+		}
+		p->crtop[js] = rtop;
+		p->crbot[js] = rbot;
 	}
 
 	/* 壁パッチ間のビームが層へ預ける係数 */
@@ -395,15 +974,41 @@ void canopy_setup(ppfd_t *p)
 	for (i = 0; i < n; i++) {
 		double *dep = &p->cdepw[(size_t)i * nl];
 		double *seg = (double *)xmalloc((size_t)nl * sizeof(double));
-		int     j;
+		vec3_t *xa = (vec3_t *)xmalloc((size_t)CANOPY_MAXSAMP * sizeof(vec3_t));
+		vec3_t *yb = (vec3_t *)xmalloc((size_t)CANOPY_MAXSAMP * sizeof(vec3_t));
+		double *W  = (double *)xmalloc((size_t)CANOPY_MAXSAMP * sizeof(double));
+		int     j, t;
 		for (j = 0; j < n; j++) {
-			const double f = p->ff[((size_t)i * n) + j];
+			/* 止まる分だけ預ける (鏡面のパッチ j では ρs の分を鏡像経路が運ぶ) */
+			const double f = p->ff[((size_t)i * n) + j] * (1.0 - p->mat[p->patch[j].imat].rhos);
+			int ns, a;
 			if (f <= 0.0) continue;
-			canopy_deposit(p, p->patch[i].c, p->patch[j].c, f, dep, seg);
+			/* setup_ff が透過率を作ったのと同じ標本で預ける (対ごとに透過 + 預け入れ = 1) */
+			ns = canopy_pair_samples(p, &p->patch[i], p->patch[j].p, p->patch[j].n, NULL, xa, yb, W);
+			for (a = 0; a < ns; a++) canopy_deposit(p, xa[a], yb[a], f * W[a], dep, seg);
+		}
+		/* 鏡像経路 : 展開した直線のまま預ける (側壁の鏡映は z を保つ) */
+		for (t = 0; t < p->nst; t++) {
+			for (j = 0; j < n; j++) {
+				const patch_t *qj = &p->patch[j];
+				const double f = p->ffs[((size_t)t * n * n) + ((size_t)i * n) + j]
+				               * (1.0 - p->mat[qj->imat].rhos);
+				vec3_t q4[4];
+				int ns, a, v;
+				if (f <= 0.0) continue;
+				for (v = 0; v < 4; v++) q4[v] = spec_apply(p, &tr[t], qj->p[v]);
+				ns = canopy_pair_samples(p, &p->patch[i], q4, spec_apply_dir(&tr[t], qj->n),
+				                         tr[t].n, xa, yb, W);
+				for (a = 0; a < ns; a++) canopy_deposit(p, xa[a], yb[a], f * W[a], dep, seg);
+			}
 		}
 		for (j = 0; j < nl; j++) dep[j] *= p->patch[i].area;
 		free(seg);
+		free(xa);
+		free(yb);
+		free(W);
 	}
+	free(tr);
 	(void)m;
 }
 
@@ -418,57 +1023,94 @@ void canopy_field(ppfd_t *p, int il, const double *B, double *aout, double *sout
 {
 	const canopy_t *c = &p->canopy;
 	const int nl = c->nlayer;
-	const double omega = canopy_omega(p, il);
 	double *Q = (double *)xcalloc((size_t)nl, sizeof(double));
-	double *fdn = &p->cfdn[(size_t)il * (nl + 1)];
-	double *fup = &p->cfup[(size_t)il * (nl + 1)];
-	double  etop = 0.0, ebot = 0.0, adiff = 0.0, dsum = 0.0;
-	int     i, m;
+	double *eprev = (double *)xcalloc((size_t)(2 * p->nslab), sizeof(double));
+	double  atot = 0.0, stot = 0.0;
+	int     i, m, js;
 
-	for (m = 0; m < nl; m++) {
-		/* 総和の順序を固定する (スレッド数によらず同じ値にするため) */
-		double d = p->cdep[((size_t)m * p->nlam) + il];
-		for (i = 0; i < p->npatch; i++) {
-			d += p->cdepw[((size_t)i * nl) + m] * B[(size_t)i * p->nlam + il];
-		}
-		dsum += d;
-		Q[m] = (omega * d) / p->carea;
+	/* 隣のスラブの面から入る光は、前の反復の値で与える (反復の中で整合する) */
+	for (js = 0; js < p->nslab; js++) {
+		eprev[2 * js]       = p->cbtop[((size_t)js * p->nlam) + il];
+		eprev[(2 * js) + 1] = p->cbbot[((size_t)js * p->nlam) + il];
 	}
 
-	canopy_column(p, omega, Q, fdn, fup, &etop, &ebot, &adiff);
+	/* スラブごとに 1 本のカラム。隣のスラブとは向かい合う面どうしでつながる */
+	for (js = 0; js < p->nslab; js++) {
+		const double omega = canopy_omega_slab(p, js, il);     /* 段ごとの葉 */
+		const double ac = slab_area(&p->slab[js]);             /* カラムの床面積 */
+		double *fdn = &p->cfdn[(((size_t)js * p->nlam) + il) * (nl + 1)];
+		double *fup = &p->cfup[(((size_t)js * p->nlam) + il) * (nl + 1)];
+		double  etop = 0.0, ebot = 0.0, adiff = 0.0, dsum = 0.0;
 
-	p->cbtop[il] = etop;
-	p->cbbot[il] = ebot;
-	/* 遮断分の (1-ω) が直接吸収、拡散場の吸収が adiff (どちらも W) */
-	*aout = ((1.0 - omega) * dsum) + (adiff * p->carea);
-	*sout = (etop + ebot) * p->carea;
+		for (m = 0; m < nl; m++) {
+			/* 総和の順序を固定する (スレッド数によらず同じ値にするため) */
+			const int g = (js * nl) + m;
+			double d = p->cdep[((size_t)g * p->nlam) + il];
+			for (i = 0; i < p->npatch; i++) {
+				d += p->cdepw[((size_t)i * p->cnl) + g] * B[(size_t)i * p->nlam + il];
+			}
+			dsum += d;
+			Q[m] = (omega * d) / ac;
+		}
 
+		{
+			const int ju = p->cnup[js], jd = p->cndn[js];
+			const double din = (ju >= 0) ? (p->cxdn[ju] * eprev[(2 * ju) + 1]) : 0.0;
+			const double uin = (jd >= 0) ? (p->cxup[jd] * eprev[2 * jd]) : 0.0;
+			canopy_column(p, js, omega, Q, din, uin, fdn, fup, &etop, &ebot, &adiff);
+		}
+
+		p->cbtop[((size_t)js * p->nlam) + il] = etop;
+		p->cbbot[((size_t)js * p->nlam) + il] = ebot;
+		/* 遮断分の (1-ω) が直接吸収、拡散場の吸収が adiff (どちらも W) */
+		atot += ((1.0 - omega) * dsum) + (adiff * ac);
+		/* キャビティへ返した放射束 : 同じ面へ戻る分と隣のスラブへ入る分を除く */
+		stot += ((etop * (1.0 - p->crtop[js] - p->cxup[js]))
+		       + (ebot * (1.0 - p->crbot[js] - p->cxdn[js]))) * ac;
+	}
+	*aout = atot;
+	*sout = stot;
+
+	free(eprev);
 	free(Q);
 }
 
 /*
-群落内部の高さ z における上向き受光面の拡散放射照度 [W/m²]。
-層界面の下向き流束を線形内挿する (測定面は上向きの量子センサ)。
+群落内部の高さ z で、単位法線の z 成分が nz の受光面が受ける拡散放射照度
+[W/m²]。層界面の流束を線形内挿する。
+
+二流近似では各半球の放射輝度が一様 (下向き L↓ = F↓/π、上向き L↑ = F↑/π)
+なので、天頂から角 β だけ傾いた面 (cos β = nz) が見る上半球の割合は
+(1 + cos β)/2、下半球は (1 - cos β)/2 になる :
+
+    E = F↓ (1 + nz)/2 + F↑ (1 - nz)/2
+
+上向き (nz = 1) なら F↓、下向きなら F↑、鉛直なら両者の平均。nz = 1 では
+係数が厳密に 1 と 0 なので、従来の上向きの値と 1 ビットも変わらない。
 */
-double canopy_interior(const ppfd_t *p, int il, double z)
+double canopy_interior(const ppfd_t *p, int js, int il, double z, double nz)
 {
 	const canopy_t *c = &p->canopy;
+	const cslab_t *sl = &p->slab[js];
 	const int nl = c->nlayer;
-	const double *fdn = &p->cfdn[(size_t)il * (nl + 1)];
-	double f;
+	const double *fdn = &p->cfdn[(((size_t)js * p->nlam) + il) * (nl + 1)];
+	const double *fup = &p->cfup[(((size_t)js * p->nlam) + il) * (nl + 1)];
+	double f, dn, up;
 	int    m;
 
-	if ((z >= c->ztop) || (z <= c->zbot)) return 0.0;
-	f = ((c->ztop - z) / (c->ztop - c->zbot)) * nl;
+	if ((z >= sl->ztop) || (z <= sl->zbot)) return 0.0;
+	f = ((sl->ztop - z) / (sl->ztop - sl->zbot)) * nl;
 	m = (int)f;
 	if (m < 0) m = 0;
 	if (m > nl - 1) m = nl - 1;
 	f -= m;
-	return (fdn[m] * (1.0 - f)) + (fdn[m + 1] * f);
+	dn = (fdn[m] * (1.0 - f)) + (fdn[m + 1] * f);
+	up = (fup[m] * (1.0 - f)) + (fup[m + 1] * f);
+	return (dn * (0.5 * (1.0 + nz))) + (up * (0.5 * (1.0 - nz)));
 }
 
 /*
-1 本のカラムの層別二流を解く (外部からの拡散入射は無い : 外から来る光は
+スラブ js の 1 本のカラムの層別二流を解く (外部からの拡散入射は無い : 外から来る光は
 すべてビームとして dep に預けられている)。
 
   Q[m]      層 m の湧き出し [W/m²] (= ω × 預け入れ / 水平面積)
@@ -480,13 +1122,14 @@ double canopy_interior(const ppfd_t *p, int il, double z)
 下から上への adding sweep で (R_b, S_b) を積み上げ、上から下へ流束を復元する。
 R < 1 なので 1 - R R_b > 0 が保証される。
 */
-void canopy_column(const ppfd_t *p, double omega, const double *Q,
+void canopy_column(const ppfd_t *p, int js, double omega, const double *Q, double din, double uin,
                    double *fdn, double *fup, double *etop, double *ebot, double *aabs)
 {
 	const canopy_t *c = &p->canopy;
+	const cslab_t *sl = &p->slab[js];
 	const int n = c->nlayer;
-	const double h = (c->ztop - c->zbot) / n;
-	const double t = c->k0 * c->a * h;
+	const double h = (sl->ztop - sl->zbot) / n;
+	const double t = sl->k0 * sl->a * h;
 	double R, T, A, E;
 	double *Rb = (double *)xmalloc((size_t)(n + 1) * sizeof(double));
 	double *Sb = (double *)xmalloc((size_t)(n + 1) * sizeof(double));
@@ -494,19 +1137,35 @@ void canopy_column(const ppfd_t *p, double omega, const double *Q,
 
 	canopy_kernel(omega, t, &R, &T, &A, &E);
 
-	/* 下面より下は空 : 反射も湧き出しも無い */
-	Rb[n] = 0.0;
-	Sb[n] = 0.0;
+	/* 下面より下 : 鏡面の床で戻る分だけ反射する (無ければ 0) */
+	Rb[n] = p->crbot[js];
+	Sb[n] = uin;                            /* 下のスラブから下面へ入る拡散光 */
 	for (m = n - 1; m >= 0; m--) {
 		const double g = 1.0 / (1.0 - (R * Rb[m + 1]));
 		const double src = E * Q[m];
 		Rb[m] = R + (T * T * Rb[m + 1] * g);
-		Sb[m] = src + (T * g * ((Rb[m + 1] * ((R * Sb[m + 1]) + src)) + Sb[m + 1]));
+		/*
+		上界面の上向き流束 (層 m の上から入射が無いとき) :
+		  u_b = Rb d + Sb,  d = R u_b + src,  u_t = T u_b + src
+		  -> u_t = src + T g (Rb src + Sb)
+		(以前は Sb に余分な (1 + R Rb) が掛かっていた。吸収を残差で数えるので
+		収支には出ず、対称な湧き出しで上下の流出が割れることで見つかった)
+		*/
+		Sb[m] = src + (T * g * ((Rb[m + 1] * src) + Sb[m + 1]));
 	}
 
-	/* 上面には外から拡散光は入らない (d_0 = 0) */
-	fdn[0] = 0.0;
-	fup[0] = Sb[0];
+	/*
+	上面 : 上のスラブから入る拡散光 din と、鏡面の天井で同じ面へ戻る分
+	crtop の拡散入射がある (d_0 = din + crtop u_0, u_0 = Rb_0 d_0 + Sb_0)。
+	どちらも無ければ d_0 = 0。下面は Rb_n = crbot、Sb_n = uin。
+	*/
+	{
+		/* din : 上のスラブから上面へ入る拡散光 (d_0 = din + crtop u_0) */
+		const double rt = p->crtop[js];
+		const double u0 = (Sb[0] + (Rb[0] * din)) / (1.0 - (Rb[0] * rt));
+		fdn[0] = din + (rt * u0);
+		fup[0] = Sb[0] + (Rb[0] * fdn[0]);
+	}
 	for (m = 0; m < n; m++) {
 		const double g = 1.0 / (1.0 - (R * Rb[m + 1]));
 		const double src = E * Q[m];
@@ -531,7 +1190,8 @@ void canopy_column(const ppfd_t *p, double omega, const double *Q,
 	{
 		double qsum = 0.0;
 		for (m = 0; m < n; m++) qsum += Q[m];
-		*aabs = (omega >= 1.0) ? 0.0 : (qsum - *etop - *ebot);
+		/* 出たもの = 正味 (境界で戻った分は差し引く) */
+		*aabs = (omega >= 1.0) ? 0.0 : (qsum - (*etop - fdn[0]) - (*ebot - fup[n]));
 		if (*aabs < 0.0) *aabs = 0.0;
 	}
 

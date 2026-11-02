@@ -1,0 +1,32 @@
+# 検証 (aa) mirror11.ppfd の参照解 : x 方向に 2 倍にした幾何。光源の鏡像
+# (1.6, 0.5, 0.85) とベッドの鏡像 (x 1.1..1.5) を実在のものとして置く
+# (2 つのベッドは同じ段)。面の分割は面ごとの div で実チャンバと同じ密度に
+# そろえる。
+
+OpenPPFD 1 0
+title = reference for mirror11 (doubled in x)
+wavelength = 380 780 5
+chamber    = 2.0 1.0 1.0
+patchdiv   = 12 6
+material = black  gray 0.0
+material = white  gray 0.6
+material = leaf   gray 0.25 0.25
+wall = all  black
+wall = xmin black div 6 6
+wall = xmax black div 6 6
+wall = ymin black div 6 12
+wall = ymax black div 12 6
+wall = zmin white div 12 6
+wall = zmax white div 6 12
+spectrum = na555 mono 555
+led = 0.4 0.5 0.85 1.0 na555 iso
+led = 1.6 0.5 0.85 1.0 na555 iso
+canopy = 0.4 0.2 2.0 0.5 leaf  0.5 0.9 0.2 0.8
+canopy = 0.4 0.2 2.0 0.5 leaf  1.1 1.5 0.2 0.8
+leafscatter = on
+target = above 0.6 6 6 0 1 0 1
+target = mid   0.3 6 6 0 1 0 1
+target = below 0.1 6 6 0 1 0 1
+photoperiod = 16
+solver      = 500 1e-10
+end

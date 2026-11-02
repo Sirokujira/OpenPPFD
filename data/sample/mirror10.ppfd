@@ -1,0 +1,40 @@
+# 検証 (y) 鏡面の天井と群落の間にすき間がある + leafscatter
+#
+# 完全鏡面 (rho_s = 1) の天井の下 0.5 m に散乱葉の群落 z 0.2..0.5 (LAI 1.5) を
+# 置き、床を白 (0.6)、側壁を黒にして leafscatter = on にする。光源は群落と
+# 天井の間の (0.4, 0.5, 0.85) にある等方点光源。
+#
+# 群落の上面から出た散乱光は天井で正反射し、側壁に当たらなかった分が
+# 上面へ戻って二流のカラムの境界からの入射になる (crtop = 上面からその
+# 鏡像への形態係数)。
+#
+# ■ 二重箱等価 (mirror10ref.ppfd と比較)
+# z で鏡映して 2 倍にすると、群落とその鏡像の 2 枚のスラブがすき間を
+# はさんで向かい合う。2 枚のスラブは棚板なしで向かい合う面どうしの拡散光の
+# やりとり (cxup / cxdn) でつながり、それが鏡面の天井の crtop と項ごとに
+# 一致する。測定面 3 枚 (群落の上・内部・下) の分布がビット一致し、群落の
+# 吸収は参照解のちょうど半分になる。
+
+OpenPPFD 1 0
+title = specular ceiling above a canopy (gap) + leafscatter
+wavelength = 380 780 5
+chamber    = 1.0 1.0 1.0
+patchdiv   = 8 8
+material = black  gray 0.0
+material = white  gray 0.6
+material = mirror gray 0.0 specular 1.0
+material = leaf   gray 0.25 0.25
+wall = all  black
+wall = zmin white
+wall = zmax mirror
+spectrum = na555 mono 555
+led = 0.4 0.5 0.85 1.0 na555 iso
+canopy = 0.5 0.2 1.5 0.5 leaf
+leafscatter = on
+target = above 0.7 6 6
+target = mid   0.35 6 6
+target = below 0.1 6 6
+photoperiod = 16
+specbounce  = 1
+solver      = 500 1e-10
+end

@@ -1,0 +1,26 @@
+# 検証 (ab) モンテカルロ : 栽培ベッドの横から通路へ出る散乱光
+#
+# 黒いチャンバの左半分 (x 0..0.5) に散乱葉 (ω = 0.5) のベッド z 0.2..0.5
+# (LAI 3.0) を置き、ベッドの上 (0.25, 0.5, 0.9) から下向きの光源 (beam 4)。
+# 通路 (x = 0.55) にベッドの方を向く鉛直の測定面を置く。
+#
+# 決定論の leafscatter は二流 (鉛直 1 次元) なので、ベッドの側面から横に
+# 出る散乱光は通路に届かない (黒葉と同じ値)。光子追跡は群落の中の散乱を
+# 3 次元で追うので、通路の面はベッドの側面からの散乱光を受ける。
+# check スクリプトは黒葉 (ω = 0) との比で判定する。
+
+OpenPPFD 1 0
+title = monte carlo : lateral scattering from a canopy bed into the aisle
+wavelength = 380 780 5
+chamber    = 1.0 1.0 1.0
+material = black gray 0.0
+material = leaf  gray 0.25 0.25
+wall = all black
+spectrum = na555 mono 555
+led = 0.25 0.5 0.9 1.0 na555 beam 4
+canopy = 0.5 0.2 3.0 0.5 leaf  0.0 0.5 0.0 1.0
+sensor = aisle 0.55 1.0 0.2  0.55 0.0 0.2  0.55 1.0 0.5  4 3
+target = floor 0.1 10 10 0.5 1.0 0.0 1.0
+photoperiod = 16
+montecarlo = 4000000 9
+end

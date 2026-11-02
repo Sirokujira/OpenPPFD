@@ -1,0 +1,34 @@
+# 検証 (v) mirror8.ppfd の参照解 : x と y の両方で 2 倍にした幾何
+# 光源の鏡像 3 個を実在の光源として置く。鏡映面 (x = 1, y = 1) には壁が
+# 無い。x = 2 / y = 2 はそれぞれ xmin / ymin (黒) の鏡像。黒い側壁の分割は
+# 実チャンバの 6 x 6 (1 m x 1 m) と同じ密度になるよう面ごとの div で与える
+# (xmin / ymax は u = 長辺, v = z、xmax / ymin は u = z, v = 長辺)。
+
+OpenPPFD 1 0
+title = reference for mirror8 (doubled box)
+wavelength = 380 780 5
+chamber    = 2.0 2.0 1.0
+patchdiv   = 12 12
+material = black  gray 0.0
+material = white  gray 0.6
+material = ceil   gray 0.5
+material = leaf   gray 0.25 0.25
+wall = all  black
+wall = xmin black div 12 6
+wall = xmax black div 6 12
+wall = ymin black div 6 12
+wall = ymax black div 12 6
+wall = zmin white
+wall = zmax ceil
+spectrum = na555 mono 555
+led = 0.3 0.4 0.85 1.0 na555 iso
+led = 1.7 0.4 0.85 1.0 na555 iso
+led = 0.3 1.6 0.85 1.0 na555 iso
+led = 1.7 1.6 0.85 1.0 na555 iso
+canopy = 0.5 0.2 2.0 0.5 leaf
+leafscatter = on
+target      = below 0.1 6 6 0 1 0 1
+target      = above 0.7 6 6 0 1 0 1
+target      = mid 0.35 6 6 0 1 0 1
+photoperiod = 16
+end

@@ -25,11 +25,15 @@ F_ij は上の求積の精度で厳密になる。遮蔽物があるときは可
 
     V_ij = (両パッチ上の標本点対のうち遮られない割合)
 
-を掛ける。まず 2×2 × 2×2 = 16 本の線分で判定し、全部同じ (完全に見える
-/ 完全に隠れる) ならそこで確定する — 棚板がキャビティを仕切るような
-配置ではすべての対がこれで確定し、遮蔽があっても F は厳密なままになる。
-判定が割れた対だけ 4×4 × 4×4 = 256 本へ細分する。この細分された対の
-数はログに出す (標本化に頼った = 厳密でない箇所がどれだけあったか)。
+を掛ける。両パッチの外接箱がどの遮蔽物とも重ならなければ厳密に 1、
+重なれば 4×4 × 4×4 = 256 本の線分で数える (下の vis_patch_patch)。
+棚板がキャビティを仕切るような配置ではすべての対が 0 か 1 になり、遮蔽が
+あっても F は厳密なままになる。0 と 1 の間になった対の数はログに出す
+(標本化に頼った = 厳密でない箇所がどれだけあったか)。
+
+■ 群落
+群落があるときは対ごとの経路長の分布を 2 点 Gauss 則に縮めて持つ
+(canopy_plen の説明を参照)。
 */
 
 #include "ppfd.h"
@@ -184,71 +188,317 @@ static double patch_size(const patch_t *q)
 	return v_norm(v_sub(q->p[2], q->p[0]));
 }
 
-/* パッチ上の層化標本点 (nsub × nsub の小矩形の中心) */
-static vec3_t patch_sample(const patch_t *q, int iu, int iv, int nsub)
+/*
+可視率の標本点の 1 次元座標 (4 点の層化標本)。
+
+小矩形の中心 (k + 1/2)/4 のような有理数の格子だと、2 桁の小数で書いた板の
+辺に「光線の族」がまとめて乗る (例 : 板の高さ 0.53、辺 0.31 で
+0.47 * 17/48 + 0.53 * 13/48 = 0.31 ちょうど)。乗った光線の当たり外れは
+丸めで決まり、16 本単位で可視率が跳ぶ。そこで各層の中の位置を無理数に
+ずらす。
+
+  - どちらの集合も u -> 1 - u で閉じている : パッチを鏡映しても (角の順序が
+    変わっても) 同じ点の集合になるので、鏡面の二重箱等価が保たれる。
+  - 受光側 (vis_a : 黄金比) と放射側 (vis_b : √2) で別の集合を使う : 同じ
+    集合だと s と 1 - s の組の中点が有理数に戻り、ちょうど中間の高さに
+    置いた板の辺に乗る。√5 と √2 は有理数上で独立なので、2 点を結ぶ線分が
+    有理数の座標を通ることはない。
+*/
+static const double vis_a[4] = {
+	0.12732200375003502,        /* (2 - φ) / 3 */
+	0.3819660112501051,        /* 2 - φ */
+	0.6180339887498949,        /* φ - 1 = 1 - (2 - φ) */
+	0.872677996249965         /* 1 - (2 - φ) / 3 */
+};
+static const double vis_b[4] = {
+	0.13807118745769839,        /* (√2 - 1) / 3 */
+	0.41421356237309515,        /* √2 - 1 */
+	0.58578643762690485,        /* 2 - √2 = 1 - (√2 - 1) */
+	0.86192881254230158         /* 1 - (√2 - 1) / 3 */
+};
+
+/* パッチ上の層化標本点 (4 x 4)。set = 0 : 受光側 (vis_a)、1 : 放射側 (vis_b) */
+static vec3_t patch_sample(const patch_t *q, int iu, int iv, int set)
 {
 	const vec3_t eu = v_sub(q->p[1], q->p[0]);
 	const vec3_t ev = v_sub(q->p[3], q->p[0]);
-	const double u = ((double)iu + 0.5) / nsub;
-	const double v = ((double)iv + 0.5) / nsub;
+	const double *t = (set == 0) ? vis_a : vis_b;
 
-	return v_add(q->p[0], v_add(v_scale(eu, u), v_scale(ev, v)));
+	return v_add(q->p[0], v_add(v_scale(eu, t[iu]), v_scale(ev, t[iv])));
+}
+
+/* 点の並びの軸並行の外接箱 */
+static void bbox_add(vec3_t *lo, vec3_t *hi, vec3_t a)
+{
+	if (a.x < lo->x) lo->x = a.x;
+	if (a.y < lo->y) lo->y = a.y;
+	if (a.z < lo->z) lo->z = a.z;
+	if (a.x > hi->x) hi->x = a.x;
+	if (a.y > hi->y) hi->y = a.y;
+	if (a.z > hi->z) hi->z = a.z;
 }
 
 /*
-点 x からパッチ q の可視率 (0..1)。遮蔽物が無ければ 1。
-判定が割れたら細分し、そのとき *refined を 1 にする (診断用)。
+可視率の推定 (vis_point_patch / vis_patch_patch) の組み立て :
+
+  1. 両端 (点とパッチ、またはパッチとパッチ) の外接箱がどの遮蔽物とも
+     重ならなければ、どの光線も当たりえないので厳密に 1。
+  2. 重なれば、常に細かい標本 (点 -> パッチは 4 x 4 = 16 本、
+     パッチ -> パッチは 4 x 4 x 4 x 4 = 256 本) で数える。
+
+以前は 2 x 2 の粗い標本が全一致ならそこで打ち切っていた。それだと影の
+境界が粗い標本のすき間を通ると見落とし、1 本でも判定が割れた瞬間に細かい
+推定へ跳ぶので、規則格子の光線が板の辺にちょうど乗る配置では丸めの違い
+1 本で F が ~15% 動いた (slab 法と平面交差で結果が割れた実例あり)。
+いまの組み立てでは、1 の判定の境目 (外接箱が触れ始める所) で細かい推定も
+「全光線が通る = 1」になるので値が跳ばない。残る段差は光線 1 本ぶん
+(1/16 または 1/256) だけ。
+
+*refined は可視率が 0 と 1 の間 (部分的な影) になった対で 1 にする (診断)。
+n は q が鏡像パッチのときの展開指数 (実在のパッチなら NULL)。
 */
-double vis_point_patch(const ppfd_t *p, vec3_t x, const patch_t *q, int *refined)
+double vis_point_patch(const ppfd_t *p, vec3_t x, const patch_t *q, const int *n, int *refined)
 {
-	int nsub, pass;
+	const int nsub = 4;
+	vec3_t lo = x, hi = x;
+	int    nvis = 0, ju, jv, v;
 
-	if (p->nocc == 0) return 1.0;
+	if (!occ_any(p)) return 1.0;
+	for (v = 0; v < 4; v++) bbox_add(&lo, &hi, q->p[v]);
+	if (!occ_aabb_overlap(p, lo, hi, n)) return 1.0;
 
-	for (pass = 0; pass < 2; pass++) {
-		int nvis = 0, ntot = 0, ju, jv;
-		nsub = (pass == 0) ? 2 : 4;
-		for (jv = 0; jv < nsub; jv++) {
-			for (ju = 0; ju < nsub; ju++) {
-				ntot++;
-				if (!occ_blocked(p, x, patch_sample(q, ju, jv, nsub))) nvis++;
-			}
-		}
-		if ((nvis == 0) || (nvis == ntot) || (pass == 1)) {
-			if ((pass == 1) && (refined != NULL)) *refined = 1;
-			return (double)nvis / ntot;
+	for (jv = 0; jv < nsub; jv++) {
+		for (ju = 0; ju < nsub; ju++) {
+			if (!occ_blocked_img(p, x, patch_sample(q, ju, jv, 1), n)) nvis++;
 		}
 	}
-	return 1.0;
+	if ((nvis > 0) && (nvis < nsub * nsub) && (refined != NULL)) *refined = 1;
+	return (double)nvis / (nsub * nsub);
 }
 
-/* パッチ i からパッチ j の可視率 (0..1)。遮蔽物が無ければ 1 */
-double vis_patch_patch(const ppfd_t *p, const patch_t *qi, const patch_t *qj, int *refined)
+/* パッチ i からパッチ j の可視率 (0..1)。組み立ては vis_point_patch と同じ */
+double vis_patch_patch(const ppfd_t *p, const patch_t *qi, const patch_t *qj, const int *n, int *refined)
 {
-	int nsub, pass;
+	const int nsub = 4;
+	const int ntot = nsub * nsub * nsub * nsub;
+	vec3_t lo = qi->p[0], hi = qi->p[0];
+	int    nvis = 0, iu, iv, ju, jv, v;
 
-	if (p->nocc == 0) return 1.0;
+	if (!occ_any(p)) return 1.0;
+	for (v = 1; v < 4; v++) bbox_add(&lo, &hi, qi->p[v]);
+	for (v = 0; v < 4; v++) bbox_add(&lo, &hi, qj->p[v]);
+	if (!occ_aabb_overlap(p, lo, hi, n)) return 1.0;
 
-	for (pass = 0; pass < 2; pass++) {
-		int nvis = 0, ntot = 0, iu, iv, ju, jv;
-		nsub = (pass == 0) ? 2 : 4;
-		for (iv = 0; iv < nsub; iv++) {
-			for (iu = 0; iu < nsub; iu++) {
-				const vec3_t si = patch_sample(qi, iu, iv, nsub);
-				for (jv = 0; jv < nsub; jv++) {
-					for (ju = 0; ju < nsub; ju++) {
-						ntot++;
-						if (!occ_blocked(p, si, patch_sample(qj, ju, jv, nsub))) nvis++;
-					}
+	for (iv = 0; iv < nsub; iv++) {
+		for (iu = 0; iu < nsub; iu++) {
+			const vec3_t si = patch_sample(qi, iu, iv, 0);
+			for (jv = 0; jv < nsub; jv++) {
+				for (ju = 0; ju < nsub; ju++) {
+					if (!occ_blocked_img(p, si, patch_sample(qj, ju, jv, 1), n)) nvis++;
 				}
 			}
 		}
-		if ((nvis == 0) || (nvis == ntot) || (pass == 1)) {
-			if ((pass == 1) && (refined != NULL)) *refined = 1;
-			return (double)nvis / ntot;
+	}
+	if ((nvis > 0) && (nvis < ntot) && (refined != NULL)) *refined = 1;
+	return (double)nvis / ntot;
+}
+
+/*
+■ パッチ間の群落透過率
+
+形態係数の重みで平均した透過率は
+
+    τ_ij(k) = ∫∫ K e^{-k s(x,y)} dA_x dA_y / ∫∫ K dA_x dA_y,
+    K = cos θ_x cos θ_y / r²
+
+で、経路長 s が対の中でばらつくので重心どうしの 1 本 (exp(-k s_c)) では
+決まらない (指数の凸性で必ず過小評価になる。平行平板の間の拡散透過
+2E₃(τ₀) で -0.35%)。k は葉の散乱係数を通じて波長ごとに変わるので、
+対ごとに 1 個の透過率を持つことはできない。そこで経路長の分布 (K で
+重み付けした標本) を 2 点の Gauss 則
+
+    τ(k) ≈ w₁ e^{-k s₁} + (1 - w₁) e^{-k s₂}
+
+に縮めて持つ。2 点は分布の 0〜3 次のモーメントを再現するので、
+τ(k) を k = 0 のまわりで 3 次まで正しく与え、分布が 2 点以下の原子なら
+(全部が同じ長さ、または「群落を通る / 通らない」が半々など) 厳密になる。
+
+標本は両パッチ上の Gauss-Legendre 点の直積 (近接対は 4×4 × 4×4、遠い対は
+2×2 × 2×2)。s(x,y) は端点について連続なので、影の判定のような有理数の
+格子の問題は起きない (遮蔽物の影になる標本対は、可視率と同じく通らない
+光線として重みから外す)。
+
+leafscatter = on では k = G a が波長によらないので、標本の平均 τ を
+そのまま 1 個の等価経路長 -ln τ / k で持つ (2 点に縮めない)。層への
+預け入れ (canopy_setup) も同じ標本で作るので、対ごとに「透過 + 預け入れ
+= 1」がそのまま成り立つ。
+*/
+static const double gx2[2] = {
+	0.5 * (1.0 - 0.5773502691896258), 0.5 * (1.0 + 0.5773502691896258)
+};
+static const double gw2[2] = { 0.5, 0.5 };
+static const double gx4[4] = {
+	0.5 * (1.0 - 0.8611363115940526), 0.5 * (1.0 - 0.3399810435848563),
+	0.5 * (1.0 + 0.3399810435848563), 0.5 * (1.0 + 0.8611363115940526)
+};
+static const double gw4[4] = {
+	0.5 * 0.3478548451374538, 0.5 * 0.6521451548625461,
+	0.5 * 0.6521451548625461, 0.5 * 0.3478548451374538
+};
+
+/*
+受光側 (点 xr[0..nr-1]、重み wr、法線 nrm) と放射側 (角 q4、法線 nj) の
+経路の標本を作る。放射側は m × m の Gauss 点。tn は放射側が鏡像パッチの
+ときの展開指数 (実在なら NULL)。重みは総和 1 に規格化して返す。
+戻り値 = 標本数 (0 : 群落を通りえない、または有効な標本が無い)。
+*/
+static int canopy_samples(const ppfd_t *p, const vec3_t *xr, const double *wr, int nr, vec3_t nrm,
+                          const vec3_t *q4, vec3_t nj, int m, const int *tn,
+                          vec3_t *xa, vec3_t *yb, double *W)
+{
+	const vec3_t eu = v_sub(q4[1], q4[0]);
+	const vec3_t ev = v_sub(q4[3], q4[0]);
+	const double *gx = (m == 4) ? gx4 : gx2;
+	const double *gw = (m == 4) ? gw4 : gw2;
+	vec3_t lo = q4[0], hi = q4[0];
+	double wsum = 0.0;
+	int    ns = 0, occl, a, iu, iv, v;
+
+	for (v = 1; v < 4; v++) bbox_add(&lo, &hi, q4[v]);
+	for (a = 0; a < nr; a++) bbox_add(&lo, &hi, xr[a]);
+	if (!canopy_may_cross(p, lo.z, hi.z)) return 0;
+	occl = occ_aabb_overlap(p, lo, hi, tn);
+
+	for (a = 0; a < nr; a++) {
+		for (iv = 0; iv < m; iv++) {
+			for (iu = 0; iu < m; iu++) {
+				const vec3_t y = v_add(q4[0], v_add(v_scale(eu, gx[iu]), v_scale(ev, gx[iv])));
+				const vec3_t d = v_sub(y, xr[a]);
+				const double r2 = v_dot(d, d);
+				const double ci = v_dot(nrm, d);
+				const double cj = -v_dot(nj, d);
+				double w;
+				if ((ci <= 0.0) || (cj <= 0.0) || (r2 <= 0.0)) continue;
+				if (occl && occ_blocked_img(p, xr[a], y, tn)) continue;
+				w = wr[a] * gw[iu] * gw[iv] * ci * cj / (r2 * r2);
+				xa[ns] = xr[a];
+				yb[ns] = y;
+				W[ns] = w;
+				wsum += w;
+				ns++;
+			}
 		}
 	}
-	return 1.0;
+	if ((ns == 0) || (wsum <= 0.0)) return 0;
+	for (a = 0; a < ns; a++) W[a] /= wsum;
+	return ns;
+}
+
+/* パッチ q の m × m Gauss 点 (重みの総和 1) */
+static int patch_gauss(const patch_t *q, int m, vec3_t *xs, double *ws)
+{
+	const vec3_t eu = v_sub(q->p[1], q->p[0]);
+	const vec3_t ev = v_sub(q->p[3], q->p[0]);
+	const double *gx = (m == 4) ? gx4 : gx2;
+	const double *gw = (m == 4) ? gw4 : gw2;
+	int iu, iv, k = 0;
+
+	for (iv = 0; iv < m; iv++) {
+		for (iu = 0; iu < m; iu++) {
+			xs[k] = v_add(q->p[0], v_add(v_scale(eu, gx[iu]), v_scale(ev, gx[iv])));
+			ws[k] = gw[iu] * gw[iv];
+			k++;
+		}
+	}
+	return k;
+}
+
+/*
+パッチ qi (受光側) とパッチ qj (放射側。鏡像なら角 q4・法線 nj・展開指数
+tn) の経路の標本。近接対ほど経路長のばらつきが大きいので細かく取る。
+setup_ff と canopy_setup (層への預け入れ) が同じ標本を使うための窓口。
+*/
+int canopy_pair_samples(const ppfd_t *p, const patch_t *qi, const vec3_t *q4, vec3_t nj,
+                        const int *tn, vec3_t *xa, vec3_t *yb, double *W)
+{
+	const vec3_t cj = v_scale(v_add(q4[0], q4[2]), 0.5);
+	const double si = patch_size(qi);
+	const double sj = v_norm(v_sub(q4[2], q4[0]));
+	const double dist = v_norm(v_sub(cj, qi->c));
+	const int    m = (dist < (2.0 * (si + sj))) ? 4 : 2;
+	vec3_t xs[16];
+	double ws[16];
+	const int nr = patch_gauss(qi, m, xs, ws);
+
+	return canopy_samples(p, xs, ws, nr, qi->n, q4, nj, m, tn, xa, yb, W);
+}
+
+/* 点 x (法線 nrm) とパッチ (角 q4・法線 nj・展開指数 tn) の経路の標本 */
+int canopy_point_samples(const ppfd_t *p, vec3_t x, vec3_t nrm, const vec3_t *q4, vec3_t nj,
+                         const int *tn, vec3_t *xa, vec3_t *yb, double *W)
+{
+	const vec3_t cj = v_scale(v_add(q4[0], q4[2]), 0.5);
+	const double sj = v_norm(v_sub(q4[2], q4[0]));
+	const double dist = v_norm(v_sub(cj, x));
+	const int    m = (dist < (2.0 * sj)) ? 4 : 2;
+	const double w1 = 1.0;
+
+	return canopy_samples(p, &x, &w1, 1, nrm, q4, nj, m, tn, xa, yb, W);
+}
+
+/*
+標本 (xa, yb, W) の経路長の分布を 2 点 Gauss 則 (s₁, s₂, w₁) に縮めて
+out[0..2] へ書く。ns = 0 なら経路長 0 (減衰なし)。leafscatter のときは
+平均の透過率を 1 個の等価経路長で持つ (上の説明)。
+*/
+void canopy_plen(const ppfd_t *p, int ns, const vec3_t *xa, const vec3_t *yb, const double *W,
+                 float *out)
+{
+	double s[CANOPY_MAXSAMP];
+	double mu = 0.0, var = 0.0, m3 = 0.0;
+	int    a;
+
+	out[0] = 0.0f;
+	out[1] = 0.0f;
+	out[2] = 1.0f;
+	if (ns <= 0) return;
+
+	for (a = 0; a < ns; a++) {
+		s[a] = canopy_path(p, xa[a], yb[a]);
+		mu += W[a] * s[a];
+	}
+	if (p->canopy.scatter) {
+		const double k = p->canopy.k0 * p->canopy.a;
+		double tr = 0.0;
+		for (a = 0; a < ns; a++) tr += W[a] * exp(-k * s[a]);
+		if ((k > 0.0) && (tr > 0.0)) out[0] = (float)(-log(tr) / k);
+		else                          out[0] = (float)mu;
+		out[1] = out[0];
+		return;
+	}
+	for (a = 0; a < ns; a++) {
+		const double y = s[a] - mu;
+		var += W[a] * y * y;
+		m3  += W[a] * y * y * y;
+	}
+	if (var <= (1e-14 * ((mu * mu) + 1e-300))) {
+		out[0] = (float)mu;
+		out[1] = (float)mu;
+		return;
+	}
+	{
+		/* 平均まわりの 2 次の直交多項式 y² - c y - σ² の根 */
+		const double c = m3 / var;
+		const double r = sqrt((c * c) + (4.0 * var));
+		const double y1 = 0.5 * (c - r);
+		const double y2 = 0.5 * (c + r);
+		double s1 = mu + y1;
+		const double s2 = mu + y2;
+		if (s1 < 0.0) s1 = 0.0;
+		out[0] = (float)s1;
+		out[1] = (float)s2;
+		out[2] = (float)(y2 / (y2 - y1));
+	}
 }
 
 /* 2 つのパッチが同一平面にあるか (互いに見えない) */
@@ -266,7 +516,7 @@ void setup_ff(ppfd_t *p)
 
 	p->ff = (double *)xcalloc((size_t)n * n, sizeof(double));
 	if (p->canopy.on) {
-		p->plen = (float *)xcalloc((size_t)n * n, sizeof(float));
+		p->plen = (float *)xcalloc((size_t)n * n * PLEN_N, sizeof(float));
 	}
 
 #ifdef _OPENMP
@@ -276,6 +526,8 @@ void setup_ff(ppfd_t *p)
 		int    j;
 		vec3_t xs[144];
 		double ws[144];
+		vec3_t xa[CANOPY_MAXSAMP], yb[CANOPY_MAXSAMP];
+		double W[CANOPY_MAXSAMP];
 		const patch_t *qi = &p->patch[i];
 		const double si = patch_size(qi);
 
@@ -285,16 +537,18 @@ void setup_ff(ppfd_t *p)
 			int    msub, nq, g, refined = 0;
 
 			if (i == j) continue;
+			if (p->pcov[i] || p->pcov[j]) continue; /* 接して覆われたパッチ : 光が届かない */
 			if (qi->iface == qj->iface) continue;   /* 同一面 : 互いに見えない */
 			if (coplanar(qi, qj)) continue;         /* 同一平面 (遮蔽物と壁の接触等) */
 
-			if (p->plen != NULL) {
-				p->plen[((size_t)i * n) + j] = (float)canopy_path(p, qi->c, qj->c);
-			}
-
-			vis = vis_patch_patch(p, qi, qj, &refined);
+			vis = vis_patch_patch(p, qi, qj, NULL, &refined);
 			npartial += refined;
 			if (vis <= 0.0) continue;
+
+			if (p->plen != NULL) {
+				const int ns = canopy_pair_samples(p, qi, qj->p, qj->n, NULL, xa, yb, W);
+				canopy_plen(p, ns, xa, yb, W, &p->plen[(((size_t)i * n) + j) * PLEN_N]);
+			}
 
 			sj = patch_size(qj);
 			dist = v_norm(v_sub(qj->c, qi->c));
@@ -364,8 +618,8 @@ void setup_ff(ppfd_t *p)
 	超えるのが正しい : 鏡面壁への到達分は全量で数え、その続きの
 	正反射分も別項として数える帳簿だから)。
 
-	群落・遮蔽物との併用は入力段で弾かれているので、ここでは減衰も
-	可視率も考えなくてよい。
+	群落と併用するときは鏡像経路ごとの減衰を後で掛けるので分離保持し
+	(下記)、遮蔽物があれば鏡像パッチへの直線で可視率を掛ける。
 	*/
 	{
 		strans_t *tr = (strans_t *)xmalloc((size_t)MAXSPECT * sizeof(strans_t));
@@ -387,17 +641,20 @@ void setup_ff(ppfd_t *p)
 			}
 			p->nst = nt;
 			p->ffs = (double *)xcalloc((size_t)nt * n * n, sizeof(double));
-			p->plens = (float *)xcalloc((size_t)nt * n * n, sizeof(float));
+			p->plens = (float *)xcalloc((size_t)nt * n * n * PLEN_N, sizeof(float));
 		}
 
 		if (nt > 0) {
 			int is;
+			int npart_s = 0;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(dynamic) reduction(+:npart_s)
 #endif
 			for (is = 0; is < n; is++) {
 				vec3_t xs[144];
 				double ws[144];
+				vec3_t xa[CANOPY_MAXSAMP], yb[CANOPY_MAXSAMP];
+				double W[CANOPY_MAXSAMP];
 				const patch_t *qi = &p->patch[is];
 				const double si = patch_size(qi);
 				int it, j;
@@ -410,6 +667,7 @@ void setup_ff(ppfd_t *p)
 						int    msub, nq, g, v;
 
 						if (spec_on_mirror(p, &tr[it], qj)) continue;
+						if (p->pcov[is] || p->pcov[j]) continue;
 						for (v = 0; v < 4; v++) q4[v] = spec_apply(p, &tr[it], qj->p[v]);
 						nj = spec_apply_dir(&tr[it], qj->n);
 						cj = spec_apply(p, &tr[it], qj->c);
@@ -425,16 +683,37 @@ void setup_ff(ppfd_t *p)
 							if (v_dot(nj, v_sub(xs[g], q4[0])) <= 0.0) continue;
 							f += ws[g] * ff_point_poly(xs[g], qi->n, q4, 4);
 						}
+						if ((f > 0.0) && occ_any(p)) {
+							/*
+							棚板の影 : 鏡像パッチへの直線を折り返して、通りうる
+							チャンバの複製それぞれにある棚板の鏡像と照合する
+							(occ_blocked_img)。鏡像パッチは角を写した仮のパッチで表す。
+							*/
+							patch_t qm = *qj;
+							int     refined = 0;
+							for (v = 0; v < 4; v++) qm.p[v] = q4[v];
+							qm.n = nj;
+							qm.c = cj;
+							f *= vis_patch_patch(p, qi, &qm, tr[it].n, &refined);
+							npart_s += refined;
+						}
 						if (p->nst > 0) {
 							const size_t k = ((size_t)it * n * n) + ((size_t)is * n) + j;
 							p->ffs[k] = tr[it].w * f;
-							p->plens[k] = (float)canopy_path(p, qi->c, cj);
+							if (f > 0.0) {
+								/* 鏡像パッチへの直線の z を折り返して測る (canopy_path) */
+								const int ns = canopy_pair_samples(p, qi, q4, nj, tr[it].n, xa, yb, W);
+								canopy_plen(p, ns, xa, yb, W, &p->plens[k * PLEN_N]);
+							}
 						}
 						else {
 							p->ff[((size_t)is * n) + j] += tr[it].w * f;
 						}
 					}
 				}
+			}
+			if (occ_any(p)) {
+				plog(p, "specular ff : partially shadowed mirrored patch pairs = %d\n", npart_s);
 			}
 			plog(p, "specular ff : %d mirror transforms %s\n",
 				nt, (p->nst > 0) ? "kept separate (canopy attenuation per folded path)"

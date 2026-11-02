@@ -168,6 +168,23 @@ static int build_material(ppfd_t *p, pmat_t *m, char **tok, int ntok, int k)
 	波長非依存のスカラ : 反射フィルムや研磨アルミはほぼ中性なので、
 	分光にせず 1 個の値で持つ (README に明記)。
 	*/
+	/*
+	光沢反射は末尾の "glossy <ρg> <n>" (montecarlo のみ。鏡面の向きのまわりの
+	cos^n ローブ)。specular と同じく波長非依存のスカラ。
+	*/
+	m->rhog = 0.0;
+	m->gexp = 0.0;
+	for (i = k; i + 2 < ntok; i++) {
+		if (streq_ci(tok[i], "glossy")) {
+			m->rhog = atof(tok[i + 1]);
+			m->gexp = atof(tok[i + 2]);
+			if (m->rhog < 0.0) m->rhog = 0.0;
+			if (m->rhog > 1.0) m->rhog = 1.0;
+			if (m->gexp < 0.0) m->gexp = 0.0;
+			ntok = i;
+			break;
+		}
+	}
 	for (i = k; i + 1 < ntok; i++) {
 		if (streq_ci(tok[i], "specular") || streq_ci(tok[i], "mirror")) {
 			m->rhos = atof(tok[i + 1]);
@@ -227,11 +244,54 @@ static int build_material(ppfd_t *p, pmat_t *m, char **tok, int ntok, int k)
 }
 
 /* スペクトル (ビン重み、総和 1) を組み立てる。戻り値 0 = 成功 */
+/*
+スペクトルの放射束のうち、計算する波長範囲 [lam0 - dλ/2, lam_end + dλ/2] に
+入る割合。範囲外の分は計算に乗らない : W 欄で与えた放射束 (スペクトル全体の
+値) にこの割合を掛けて範囲内の分だけを光源に持たせる (以前は範囲内のビンへ
+全量を押し込んでいたので、400-700 nm の計算に 730 nm の LED 1 W を入れると
+PPF が 2000 倍に、3000 K の黒体なら +56% になっていた)。外れが 1e-4 (0.01%)
+未満なら厳密に 1 とする : 白色 LED の蛍光体のガウス形の裾 (380-780 nm の外へ
+1e-5 程度) のような無視できる分で値もログも変えない (ふつうの入力は 1 ビットも
+変わらない)。
+*/
+static double spec_fin(double fout)
+{
+	return (fout < 1e-4) ? 1.0 : (1.0 - fout);
+}
+
+/* ガウス形 (中心 c、半値全幅 fw) の範囲 [lo, hi] の外の割合 */
+static double gauss_out(double c, double fw, double lo, double hi)
+{
+	const double sig = fw / (2.0 * sqrt(2.0 * log(2.0)));
+	return 0.5 * erfc((hi - c) / (sig * sqrt(2.0))) + 0.5 * erfc((c - lo) / (sig * sqrt(2.0)));
+}
+
+/* 区分線形の表の [a, b] の積分 (表の範囲の外は 0) */
+static double table_integral(const double *x, const double *y, int n, double a, double b)
+{
+	double s = 0.0;
+	int    j;
+	for (j = 0; j + 1 < n; j++) {
+		const double x0 = x[j], x1 = x[j + 1];
+		const double l = (x0 > a) ? x0 : a, h = (x1 < b) ? x1 : b;
+		if ((x1 <= x0) || (h <= l)) continue;
+		{
+			const double yl = y[j] + ((y[j + 1] - y[j]) * (l - x0) / (x1 - x0));
+			const double yh = y[j] + ((y[j + 1] - y[j]) * (h - x0) / (x1 - x0));
+			s += 0.5 * (yl + yh) * (h - l);
+		}
+	}
+	return s;
+}
+
 static int build_spectrum(ppfd_t *p, spec_t *s, char **tok, int ntok, int k)
 {
+	const double glo = p->lam0 - (0.5 * p->dlam);
+	const double ghi = p->lam[p->nlam - 1] + (0.5 * p->dlam);
 	int i;
 
 	s->w = (double *)xcalloc((size_t)p->nlam, sizeof(double));
+	s->fin = 1.0;
 	if (k >= ntok) return 1;
 
 	if (streq_ci(tok[k], "mono")) {
@@ -264,12 +324,14 @@ static int build_spectrum(ppfd_t *p, spec_t *s, char **tok, int ntok, int k)
 			s->w[i] = exp(-4.0 * log(2.0) * t * t);
 		}
 		spec_normalize(s->w, p->nlam);
+		s->fin = spec_fin(gauss_out(c, fw, glo, ghi));
 		return 0;
 	}
 	else if (streq_ci(tok[k], "sum")) {
 		/* 3 つ組 (中心, 半値全幅, 重み) の繰り返し : 白色 LED = 青ピーク + 蛍光体 */
 		int j;
 		int npeak = 0;
+		double wsum = 0.0, wout = 0.0;
 		for (j = k + 1; j + 2 < ntok; j += 3) {
 			const double c = atof(tok[j]);
 			const double fw = atof(tok[j + 1]);
@@ -279,10 +341,14 @@ static int build_spectrum(ppfd_t *p, spec_t *s, char **tok, int ntok, int k)
 				const double t = (p->lam[i] - c) / fw;
 				s->w[i] += a * exp(-4.0 * log(2.0) * t * t);
 			}
+			/* ピークの放射束は a × fw に比例 (ガウス形の積分) */
+			wsum += a * fw;
+			wout += a * fw * gauss_out(c, fw, glo, ghi);
 			npeak++;
 		}
 		if (npeak == 0) return 1;
 		spec_normalize(s->w, p->nlam);
+		if (wsum > 0.0) s->fin = spec_fin(wout / wsum);
 		return 0;
 	}
 	else if (streq_ci(tok[k], "blackbody")) {
@@ -294,6 +360,27 @@ static int build_spectrum(ppfd_t *p, spec_t *s, char **tok, int ntok, int k)
 			s->w[i] = (x < 700.0) ? (1.0 / (pow(lm, 5.0) * (exp(x) - 1.0))) : 0.0;
 		}
 		spec_normalize(s->w, p->nlam);
+		/*
+		範囲内の割合 : ∫_lo^hi λ^-5 / (e^{a/λ} - 1) dλ (Simpson、4000 区間) と
+		全波長の積分 a^-4 π^4 / 15 (a = hc / kT) の比
+		*/
+		{
+			const double a = (H_PLANCK * C0) / (K_BOLTZ * T);
+			const int    nsimp = 4000;
+			const double lo = (glo > 1.0 ? glo : 1.0) * 1e-9, hi = ghi * 1e-9;
+			const double h = (hi - lo) / nsimp;
+			double sum = 0.0, tot;
+			int    j;
+			for (j = 0; j <= nsimp; j++) {
+				const double lm = lo + (j * h);
+				const double x = a / lm;
+				const double f = (x < 700.0) ? (1.0 / (pow(lm, 5.0) * (exp(x) - 1.0))) : 0.0;
+				sum += f * (((j == 0) || (j == nsimp)) ? 1.0 : ((j % 2) ? 4.0 : 2.0));
+			}
+			sum *= h / 3.0;
+			tot = pow(PI, 4.0) / (15.0 * pow(a, 4.0));
+			s->fin = spec_fin(1.0 - (sum / tot));
+		}
 		return 0;
 	}
 	else if (streq_ci(tok[k], "table") || streq_ci(tok[k], "file")) {
@@ -331,6 +418,11 @@ static int build_spectrum(ppfd_t *p, spec_t *s, char **tok, int ntok, int k)
 			if (s->w[i] < 0.0) s->w[i] = 0.0;
 		}
 		spec_normalize(s->w, p->nlam);
+		/* 表の範囲のうち計算する波長範囲に入る割合 (表は区分線形、表の外は数えない) */
+		{
+			const double tot = table_integral(xl, y1, n, -1e300, 1e300);
+			if (tot > 0.0) s->fin = spec_fin(1.0 - (table_integral(xl, y1, n, glo, ghi) / tot));
+		}
 		free(xl); free(y1); free(y2);
 		return 0;
 	}
@@ -419,6 +511,8 @@ static double flux_from_lm(const ppfd_t *p, int is, double lm)
 /* led / array 共通のオプション引数を読む。戻り値 0 = 成功 */
 static int emitter_options(ppfd_t *p, emitter_t *e, char **tok, int ntok, int k)
 {
+	int bycat = 0;          /* ppf / lumens で与えた (範囲内の放射束がそのまま出る) */
+
 	while (k < ntok) {
 		if (streq_ci(tok[k], "beam") && (k + 1 < ntok)) {
 			e->mexp = atof(tok[k + 1]);
@@ -461,20 +555,261 @@ static int emitter_options(ppfd_t *p, emitter_t *e, char **tok, int ntok, int k)
 		else if (streq_ci(tok[k], "ppf") && (k + 1 < ntok)) {
 			/* 放射束をカタログの PPF [µmol/s] で与える (W 欄は無視される) */
 			e->flux = flux_from_ppf(p, e->ispec, atof(tok[k + 1]));
+			bycat = 1;
 			k += 2;
 		}
 		else if (streq_ci(tok[k], "lumens") && (k + 1 < ntok)) {
 			e->flux = flux_from_lm(p, e->ispec, atof(tok[k + 1]));
+			bycat = 1;
 			k += 2;
 		}
 		else {
 			return 1;   /* 未知のオプション */
 		}
 	}
+	/*
+	W 欄の放射束はスペクトル全体の値なので、計算する波長範囲に入る分だけを
+	持たせる。ppf / lumens からの換算は範囲内の重みで解くので、もともと範囲内の
+	放射束になっている (PAR・V(λ) が範囲に入っていれば厳密)。
+	*/
+	if (!bycat) e->flux *= p->spec[e->ispec].fin;
 	make_frame(e);
 	if (e->nu < 1) e->nu = 1;
 	if (e->nv < 1) e->nv = 1;
 	return 0;
+}
+
+/*
+群落スラブの上面 (side = 1) / 下面 (side = 0) が、同一平面で向かい合う面に
+乗っている面積 [m²]。向かい合う面は、下面なら床・棚板の上面・水平な板、
+上面なら天井・棚板の下面・水平な板 (板は両面)。重なる面どうしがあれば
+二重に数える (そうした入力は呼び出し側で弾く)。
+*/
+static double face_cover(const ppfd_t *p, const cslab_t *c, int side)
+{
+	const double tol = 1e-9 * p->Lz;
+	const double zf = side ? c->ztop : c->zbot;
+	double a = 0.0;
+	int    i;
+
+	if ((side == 0) ? (zf <= tol) : (zf >= p->Lz - tol)) {
+		a += (c->x1 - c->x0) * (c->y1 - c->y0);
+	}
+	for (i = 0; i < p->nocc; i++) {
+		const occluder_t *o = &p->occ[i];
+		const double zo = side ? o->z0 : o->z1;
+		const double wx = ((o->x1 < c->x1) ? o->x1 : c->x1) - ((o->x0 > c->x0) ? o->x0 : c->x0);
+		const double wy = ((o->y1 < c->y1) ? o->y1 : c->y1) - ((o->y0 > c->y0) ? o->y0 : c->y0);
+		if ((fabs(zo - zf) > tol) || (wx <= 0.0) || (wy <= 0.0)) continue;
+		a += wx * wy;
+	}
+	for (i = 0; i < p->npanel; i++) {
+		const panel_t *pn = &p->panel[i];
+		vec3_t q[4];
+		if ((fabs(fabs(pn->n.z) - 1.0) > 1e-9) || (fabs(pn->org.z - zf) > tol)) continue;
+		q[0] = pn->org;
+		q[1] = v_add(pn->org, pn->eu);
+		q[2] = v_add(q[1], pn->ev);
+		q[3] = v_add(pn->org, pn->ev);
+		a += poly_rect_area(q, 4, c->x0, c->x1, c->y0, c->y1);
+	}
+	return a;
+}
+
+/*
+光源 e の放射束のうち、半空間 d . ns < 0 (面 ns の裏側) へ向かう割合。
+配光 (等方 / cos^m / 実測配光) を中点則で積分する (180 x 360)。半空間へ
+まったく出さない配光 (面に向けて 0) は厳密に 0 になる : cos^m は cs <= 0、
+実測配光は表の範囲外が 0。
+*/
+static double emit_frac_back(const ppfd_t *p, const emitter_t *e, vec3_t ns)
+{
+	const int nt = 180, np = 360;
+	const vec3_t w = v_scale(ns, -1.0);
+	const vec3_t a0 = (fabs(w.x) < 0.9) ? v_make(1, 0, 0) : v_make(0, 1, 0);
+	const vec3_t t1 = v_unit(v_cross(w, a0));
+	const vec3_t t2 = v_cross(w, t1);
+	double f = 0.0;
+	int    it, ip;
+
+	for (it = 0; it < nt; it++) {
+		const double th = (it + 0.5) * (0.5 * PI / nt);
+		const double st = sin(th), ct = cos(th);
+		const double dom = st * (0.5 * PI / nt) * (2.0 * PI / np);
+		for (ip = 0; ip < np; ip++) {
+			const double ph = (ip + 0.5) * (2.0 * PI / np);
+			const vec3_t d = v_add(v_scale(w, ct), v_add(v_scale(t1, st * cos(ph)), v_scale(t2, st * sin(ph))));
+			double I;
+			if (e->idist >= 0) {
+				I = photdist_dir(p, e, d);
+			}
+			else if (e->mexp < 0.0) {
+				I = 1.0 / (4.0 * PI);
+			}
+			else {
+				const double cs = v_dot(e->dir, d);
+				I = (cs <= 0.0) ? 0.0 : ((e->mexp + 1.0) / (2.0 * PI) * pow(cs, e->mexp));
+			}
+			f += I * dom;
+		}
+	}
+	return f;
+}
+
+/*
+光源 (面光源は分割した点) が面の上・遮蔽物の中にないか。面にちょうど乗った光源が
+面の側へ出す光は、距離 0 で面に当たる : 求積では拾えず (天井に置いた等方光源で
+収支 -50%)、厚さ 0 の棚板なら光線の端が板の面に乗るので素通りして上の段を
+照らす。面の上に置くなら面へ向けて光を出さない配光 (下向きの beam / dir) にする。
+厚さ 0 の板・斜めの板は片面にだけ出していればよい (板の反対側に付いた器具)。
+*/
+static int check_emitter_surfaces(const ppfd_t *p)
+{
+	const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+	const double L[3] = {p->Lx, p->Ly, p->Lz};
+	static const char *wname[6] = {"xmin", "xmax", "ymin", "ymax", "floor", "ceiling"};
+	int ie, iu, iv, a, io;
+
+	for (ie = 0; ie < p->nemit; ie++) {
+		const emitter_t *e = &p->emit[ie];
+		for (iv = 0; iv < e->nv; iv++) {
+			for (iu = 0; iu < e->nu; iu++) {
+				vec3_t sp = e->pos;
+				double c[3];
+				if (e->nu * e->nv > 1) {
+					const double du = ((iu + 0.5) / e->nu - 0.5) * e->wsize;
+					const double dv = ((iv + 0.5) / e->nv - 0.5) * e->hsize;
+					sp = v_add(sp, v_add(v_scale(e->ax, du), v_scale(e->ay, dv)));
+				}
+				c[0] = sp.x; c[1] = sp.y; c[2] = sp.z;
+				for (a = 0; a < 3; a++) {
+					if ((c[a] < -tol) || (c[a] > L[a] + tol)) {
+						fprintf(stderr, "*** light source %d at (%g, %g, %g) is outside the chamber\n",
+							ie + 1, sp.x, sp.y, sp.z);
+						return 1;
+					}
+				}
+				for (a = 0; a < 6; a++) {
+					const int ax = a / 2;
+					vec3_t ns = v_make(0, 0, 0);
+					double fr;
+					if (fabs(c[ax] - ((a % 2) ? L[ax] : 0.0)) > tol) continue;
+					if (ax == 0) ns.x = (a % 2) ? -1.0 : 1.0;
+					if (ax == 1) ns.y = (a % 2) ? -1.0 : 1.0;
+					if (ax == 2) ns.z = (a % 2) ? -1.0 : 1.0;
+					fr = emit_frac_back(p, e, ns);
+					if (fr > 1e-6) {
+						fprintf(stderr, "*** light source %d at (%g, %g, %g) lies on the %s and sends %.1f %% "
+							"of its flux into it\n", ie + 1, sp.x, sp.y, sp.z, wname[a], 100.0 * fr);
+						fprintf(stderr, "    (move it into the room, or aim its distribution away : beam / dir)\n");
+						return 1;
+					}
+				}
+				for (io = 0; io < p->nocc; io++) {
+					const occluder_t *o = &p->occ[io];
+					const double lo[3] = {o->x0, o->y0, o->z0}, hi[3] = {o->x1, o->y1, o->z1};
+					int inside = 1, onface = -1, k, thin = -1;
+					for (k = 0; k < 3; k++) {
+						if (hi[k] - lo[k] <= 1e-12) thin = k;
+						if ((c[k] < lo[k] - tol) || (c[k] > hi[k] + tol)) inside = 0;
+					}
+					if (!inside) continue;
+					for (k = 0; k < 3; k++) {
+						if ((fabs(c[k] - lo[k]) <= tol) || (fabs(c[k] - hi[k]) <= tol)) onface = k;
+					}
+					if (onface < 0) {
+						fprintf(stderr, "*** light source %d at (%g, %g, %g) is inside occluder \"%s\"\n",
+							ie + 1, sp.x, sp.y, sp.z, o->name);
+						return 1;
+					}
+					for (k = 0; k < 3; k++) {
+						/* 面に乗る軸ごとに、外向きの法線の裏 (箱の中) へ出す光 */
+						int s;
+						if ((thin >= 0) && (k != thin)) continue;     /* 厚さ 0 の板の縁の面は無い */
+						for (s = 0; s < 2; s++) {
+							vec3_t ns = v_make(0, 0, 0);
+							double fr, fr2 = 1.0;
+							if (fabs(c[k] - ((s == 0) ? lo[k] : hi[k])) > tol) continue;
+							if (k == 0) ns.x = (s == 0) ? -1.0 : 1.0;
+							if (k == 1) ns.y = (s == 0) ? -1.0 : 1.0;
+							if (k == 2) ns.z = (s == 0) ? -1.0 : 1.0;
+							fr = emit_frac_back(p, e, ns);
+							/* 厚さ 0 の板は表裏のどちらか片側へだけ出していればよい */
+							if (k == thin) fr2 = emit_frac_back(p, e, v_scale(ns, -1.0));
+							if ((fr > 1e-6) && (fr2 > 1e-6)) {
+								fprintf(stderr, "*** light source %d at (%g, %g, %g) lies on occluder \"%s\" and "
+									"sends %.1f %% of its flux into it\n", ie + 1, sp.x, sp.y, sp.z, o->name,
+									100.0 * ((k == thin) ? ((fr < fr2) ? fr : fr2) : fr));
+								fprintf(stderr, "    (move it off the surface, or aim its distribution away : beam / dir)\n");
+								return 1;
+							}
+							if (k == thin) break;   /* 板の両面は同じ平面 */
+						}
+					}
+				}
+				for (io = 0; io < p->npanel; io++) {
+					const panel_t *pn = &p->panel[io];
+					const vec3_t N = v_cross(pn->eu, pn->ev);
+					const double nn = v_dot(N, N);
+					const vec3_t r = v_sub(sp, pn->org);
+					double u, v, fr, fr2;
+					if (fabs(v_dot(r, pn->n)) > tol) continue;
+					u = v_dot(v_cross(r, pn->ev), N) / nn;
+					v = v_dot(v_cross(pn->eu, r), N) / nn;
+					if ((u < -1e-9) || (u > 1.0 + 1e-9) || (v < -1e-9) || (v > 1.0 + 1e-9)) continue;
+					fr = emit_frac_back(p, e, pn->n);
+					fr2 = emit_frac_back(p, e, v_scale(pn->n, -1.0));
+					if ((fr > 1e-6) && (fr2 > 1e-6)) {
+						fprintf(stderr, "*** light source %d at (%g, %g, %g) lies on panel \"%s\" and sends "
+							"light through both sides\n", ie + 1, sp.x, sp.y, sp.z, pn->name);
+						fprintf(stderr, "    (move it off the panel, or aim its distribution to one side : beam / dir)\n");
+						return 1;
+					}
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+/*
+平行四辺形 (斜めの板) を箱 lo..hi で切り取った多角形の面積。3 次元の
+Sutherland-Hodgman で 6 枚の半空間に順に切る (凸多角形なので頂点は 1 枚
+ごとに高々 1 個増え、4 + 6 = 10 個で足りる)。
+*/
+static double panel_box_area(const panel_t *pn, const double *lo, const double *hi)
+{
+	vec3_t a[16], b[16];
+	int    na = 4, nb, k, e;
+	double area;
+	vec3_t s = v_make(0, 0, 0);
+
+	a[0] = pn->org;
+	a[1] = v_add(pn->org, pn->eu);
+	a[2] = v_add(a[1], pn->ev);
+	a[3] = v_add(pn->org, pn->ev);
+	for (e = 0; e < 6; e++) {
+		const int ax = e / 2;
+		const double lim = (e % 2) ? hi[ax] : lo[ax];
+		nb = 0;
+		for (k = 0; k < na; k++) {
+			const vec3_t p0 = a[k], p1 = a[(k + 1) % na];
+			const double c0 = (ax == 0) ? p0.x : ((ax == 1) ? p0.y : p0.z);
+			const double c1 = (ax == 0) ? p1.x : ((ax == 1) ? p1.y : p1.z);
+			const double d0 = (e % 2) ? (lim - c0) : (c0 - lim);
+			const double d1 = (e % 2) ? (lim - c1) : (c1 - lim);
+			if (d0 >= 0.0) b[nb++] = p0;
+			if ((d0 >= 0.0) != (d1 >= 0.0)) b[nb++] = v_add(p0, v_scale(v_sub(p1, p0), d0 / (d0 - d1)));
+		}
+		na = nb;
+		for (k = 0; k < na; k++) a[k] = b[k];
+		if (na < 3) return 0.0;
+	}
+	for (k = 1; k + 1 < na; k++) {
+		s = v_add(s, v_cross(v_sub(a[k], a[0]), v_sub(a[k + 1], a[0])));
+	}
+	area = 0.5 * v_norm(s);
+	return area;
 }
 
 int input_data(FILE *fp, ppfd_t *p)
@@ -483,7 +818,8 @@ int input_data(FILE *fp, ppfd_t *p)
 	char   strline[BUFSIZ], strsave[BUFSIZ];
 	char  *token[MAXTOKEN];
 	const char sep[] = " \t";
-	int    cmat = 0, cspec = 0, cemit = 0, ctarget = 0, cband = 0, cocc = 0, cslab = 0;
+	int    cmat = 0, cspec = 0, cemit = 0, ctarget = 0, cband = 0, cocc = 0, cslab = 0, cpanel = 0;
+	int    ccyl = 0;
 	int    i;
 	double *ax_lam = NULL, *ax_v = NULL, *ax_v2 = NULL;
 	int    nax = 0;
@@ -500,6 +836,7 @@ int input_data(FILE *fp, ppfd_t *p)
 	p->converg = 1e-6;
 	p->canopy.k0 = 0.5;
 	p->canopy.nlayer = 8;
+	p->mc_seed = 1;
 	p->specbounce = 2;
 
 	/* ---- 1 回目 : 分光グリッドと作用曲線を確定する ---------------- */
@@ -631,8 +968,18 @@ int input_data(FILE *fp, ppfd_t *p)
 			p->spec[p->nspec++] = s;
 		}
 		else if (!strcmp(token[0], "wall")) {
-			int im, f;
+			/* wall = <面> <材料名> [div <nu> <nv>] */
+			int im, f, du = 0, dv = 0;
 			if (ntok < 4) { fprintf(stderr, "*** invalid wall data\n"); ierr = 1; continue; }
+			if ((ntok >= 7) && streq_ci(token[4], "div")) {
+				du = atoi(token[5]);
+				dv = atoi(token[6]);
+				if ((du < 1) || (dv < 1)) {
+					fprintf(stderr, "*** invalid wall div : %s %s\n", token[5], token[6]);
+					ierr = 1;
+					continue;
+				}
+			}
 			im = find_mat(p, token[3]);
 			if (im < 0) {
 				fprintf(stderr, "*** unknown material : %s\n", token[3]);
@@ -640,10 +987,18 @@ int input_data(FILE *fp, ppfd_t *p)
 				continue;
 			}
 			if (streq_ci(token[2], "all")) {
-				for (f = 0; f < 6; f++) p->wallmat[f] = im;
+				for (f = 0; f < 6; f++) {
+					p->wallmat[f] = im;
+					p->wdivu[f] = du;
+					p->wdivv[f] = dv;
+				}
 			}
 			else if (streq_ci(token[2], "side")) {
-				for (f = 0; f < 4; f++) p->wallmat[f] = im;
+				for (f = 0; f < 4; f++) {
+					p->wallmat[f] = im;
+					p->wdivu[f] = du;
+					p->wdivv[f] = dv;
+				}
 			}
 			else {
 				f = faceid(token[2]);
@@ -653,6 +1008,8 @@ int input_data(FILE *fp, ppfd_t *p)
 					continue;
 				}
 				p->wallmat[f] = im;
+				p->wdivu[f] = du;
+				p->wdivv[f] = dv;
 			}
 		}
 		else if (!strcmp(token[0], "led")) {
@@ -744,6 +1101,38 @@ int input_data(FILE *fp, ppfd_t *p)
 			APPEND(p->target, p->ntarget, ctarget, target_t);
 			p->target[p->ntarget++] = t;
 		}
+		else if (!strcmp(token[0], "sensor")) {
+			/*
+			sensor = name x0 y0 z0  x1 y1 z1  x3 y3 z3  nu nv
+			任意の向きの測定面。隅 p0 と隣り合う 2 隅 p1 (u 辺の端), p3 (v 辺の
+			端) の平行四辺形で、受光するのは (p1-p0) x (p3-p0) の側。
+			壁面栽培の垂直面・葉の側面・下向きのセンサ (床の照り返し) 用。
+			*/
+			target_t t;
+			vec3_t   c;
+			double   an;
+			if (ntok < 14) { fprintf(stderr, "*** invalid sensor data\n"); ierr = 1; continue; }
+			memset(&t, 0, sizeof(t));
+			strncpy(t.name, token[2], NAMELEN - 1);
+			t.sensor = 1;
+			t.org = v_make(atof(token[3]), atof(token[4]), atof(token[5]));
+			t.eu  = v_sub(v_make(atof(token[6]), atof(token[7]), atof(token[8])), t.org);
+			t.ev  = v_sub(v_make(atof(token[9]), atof(token[10]), atof(token[11])), t.org);
+			t.nx = atoi(token[12]);
+			t.ny = atoi(token[13]);
+			if ((t.nx < 1) || (t.ny < 1)) { fprintf(stderr, "*** invalid sensor data\n"); ierr = 1; continue; }
+			c = v_cross(t.eu, t.ev);
+			an = v_norm(c);
+			if (an <= (1e-12 * (v_dot(t.eu, t.eu) + v_dot(t.ev, t.ev)))) {
+				fprintf(stderr, "*** invalid sensor data (degenerate parallelogram) : %s\n", t.name);
+				ierr = 1;
+				continue;
+			}
+			t.n = v_scale(c, 1.0 / an);
+			t.z = t.org.z + (0.5 * (t.eu.z + t.ev.z));
+			APPEND(p->target, p->ntarget, ctarget, target_t);
+			p->target[p->ntarget++] = t;
+		}
 		else if (!strcmp(token[0], "occluder")) {
 			/* occluder = name x0 x1 y0 y1 z0 z1 material [div nu nv] */
 			occluder_t o;
@@ -786,16 +1175,151 @@ int input_data(FILE *fp, ppfd_t *p)
 			APPEND(p->occ, p->nocc, cocc, occluder_t);
 			p->occ[p->nocc++] = o;
 		}
+		else if (!strcmp(token[0], "panel")) {
+			/*
+			panel = name x0 y0 z0  x1 y1 z1  x3 y3 z3  material [div nu nv]
+			隅 p0 と、p0 に隣り合う 2 隅 p1 (u 辺の端), p3 (v 辺の端) で
+			平行四辺形を与える (4 隅目 = p1 + p3 - p0)。表は (p1-p0) x (p3-p0)。
+			*/
+			panel_t pn;
+			vec3_t  c;
+			double  an;
+			int     im;
+			if (ntok < 13) { fprintf(stderr, "*** invalid panel data\n"); ierr = 1; continue; }
+			memset(&pn, 0, sizeof(pn));
+			strncpy(pn.name, token[2], NAMELEN - 1);
+			pn.org = v_make(atof(token[3]), atof(token[4]), atof(token[5]));
+			pn.eu  = v_sub(v_make(atof(token[6]), atof(token[7]), atof(token[8])), pn.org);
+			pn.ev  = v_sub(v_make(atof(token[9]), atof(token[10]), atof(token[11])), pn.org);
+			im = find_mat(p, token[12]);
+			if (im < 0) {
+				fprintf(stderr, "*** unknown material : %s\n", token[12]);
+				ierr = 1;
+				continue;
+			}
+			pn.imat = im;
+			if ((ntok >= 16) && streq_ci(token[13], "div")) {
+				pn.ndivu = atoi(token[14]);
+				pn.ndivv = atoi(token[15]);
+			}
+			c = v_cross(pn.eu, pn.ev);
+			an = v_norm(c);
+			if (an <= (1e-12 * (v_dot(pn.eu, pn.eu) + v_dot(pn.ev, pn.ev)))) {
+				fprintf(stderr, "*** invalid panel data (degenerate parallelogram) : %s\n", pn.name);
+				ierr = 1;
+				continue;
+			}
+			pn.n = v_scale(c, 1.0 / an);
+			APPEND(p->panel, p->npanel, cpanel, panel_t);
+			p->panel[p->npanel++] = pn;
+		}
+		else if (!strcmp(token[0], "cylinder")) {
+			/*
+			cylinder = name x0 y0 z0  x1 y1 z1  R nseg material [arc a0 a1] [div nu nv]
+			軸 p0 -> p1、半径 R の円柱 (arc を書けば角度 a0..a1 [deg] の円弧 =
+			反射フード・半割りの管) を、内接する nseg 枚の長方形の板に分ける。
+			角度の基準は軸に直交する「上」(+z を軸に直交させた向き。軸が z に
+			平行なら +x)、向きは軸 p0 -> p1 のまわりの右ねじ。両端は開いた管
+			(中空) で、板は両面 (panel と同じ)。分割の既定は軸方向 patchdiv、
+			弦方向 1。
+			*/
+			cyl_t  cy;
+			vec3_t a0, a1, ax, e1, e2;
+			double len, r, d0 = 0.0, d1 = 360.0;
+			int    nseg, im, k, nu = 0, nv = 1, it;
+			if (ntok < 12) { fprintf(stderr, "*** invalid cylinder data\n"); ierr = 1; continue; }
+			memset(&cy, 0, sizeof(cy));
+			strncpy(cy.name, token[2], NAMELEN - 1);
+			a0 = v_make(atof(token[3]), atof(token[4]), atof(token[5]));
+			a1 = v_make(atof(token[6]), atof(token[7]), atof(token[8]));
+			r = atof(token[9]);
+			nseg = atoi(token[10]);
+			im = find_mat(p, token[11]);
+			if (im < 0) {
+				fprintf(stderr, "*** unknown material : %s\n", token[11]);
+				ierr = 1;
+				continue;
+			}
+			for (it = 12; it < ntok; it++) {
+				if (streq_ci(token[it], "arc") && (it + 2 < ntok)) {
+					d0 = atof(token[it + 1]);
+					d1 = atof(token[it + 2]);
+					it += 2;
+				}
+				else if (streq_ci(token[it], "div") && (it + 2 < ntok)) {
+					nu = atoi(token[it + 1]);
+					nv = atoi(token[it + 2]);
+					it += 2;
+				}
+			}
+			ax = v_sub(a1, a0);
+			len = v_norm(ax);
+			if ((len <= 0.0) || (r <= 0.0) || (nseg < 1) || (d1 <= d0) || ((d1 - d0) > 360.0 + 1e-9)) {
+				fprintf(stderr, "*** invalid cylinder data : %s\n", cy.name);
+				ierr = 1;
+				continue;
+			}
+			ax = v_scale(ax, 1.0 / len);
+			/* 角度の基準 e1 (軸に直交する「上」) と e2 = 軸 x e1 */
+			e1 = (fabs(ax.z) < 0.999) ? v_make(0.0, 0.0, 1.0) : v_make(1.0, 0.0, 0.0);
+			e1 = v_sub(e1, v_scale(ax, v_dot(e1, ax)));
+			e1 = v_scale(e1, 1.0 / v_norm(e1));
+			e2 = v_cross(ax, e1);
+			cy.r = r;
+			cy.a0 = d0;
+			cy.a1 = d1;
+			cy.nseg = nseg;
+			cy.ipanel0 = p->npanel;
+			for (k = 0; k < nseg; k++) {
+				const double ta = (d0 + ((d1 - d0) * k / nseg)) * (PI / 180.0);
+				const double tb = (d0 + ((d1 - d0) * (k + 1) / nseg)) * (PI / 180.0);
+				const vec3_t va = v_add(v_scale(e1, r * cos(ta)), v_scale(e2, r * sin(ta)));
+				const vec3_t vb = v_add(v_scale(e1, r * cos(tb)), v_scale(e2, r * sin(tb)));
+				panel_t pn;
+				vec3_t  c;
+				memset(&pn, 0, sizeof(pn));
+				snprintf(pn.name, NAMELEN, "%s.%d", cy.name, k);
+				pn.org = v_add(a0, va);
+				pn.eu  = v_sub(a1, a0);
+				pn.ev  = v_sub(vb, va);
+				pn.imat = im;
+				pn.ndivu = nu;
+				pn.ndivv = nv;
+				c = v_cross(pn.eu, pn.ev);
+				pn.n = v_scale(c, 1.0 / v_norm(c));
+				APPEND(p->panel, p->npanel, cpanel, panel_t);
+				p->panel[p->npanel++] = pn;
+			}
+			APPEND(p->cyl, p->ncyl, ccyl, cyl_t);
+			p->cyl[p->ncyl++] = cy;
+		}
 		else if (!strcmp(token[0], "canopy")) {
 			int    im;
 			cslab_t sl;
-			/* canopy = ztop zbot LAI G leafmaterial (複数行で多段ラックの各段) */
-			if (ntok < 7) { fprintf(stderr, "*** invalid canopy data\n"); ierr = 1; continue; }
+			/*
+			canopy = ztop zbot LAI G leafmaterial [x0 x1 y0 y1]
+			(複数行で多段ラックの各段・栽培ベッドごとの群落)。水平範囲を
+			省略すると断面全体 (従来のスラブ)。LAI は範囲の床面積あたり。
+			*/
+			if ((ntok < 7) || ((ntok > 7) && (ntok < 11))) {
+				fprintf(stderr, "*** invalid canopy data\n");
+				ierr = 1;
+				continue;
+			}
 			memset(&sl, 0, sizeof(sl));
 			sl.ztop = atof(token[2]);
 			sl.zbot = atof(token[3]);
 			sl.lai  = atof(token[4]);
 			sl.k0   = atof(token[5]);
+			sl.full = 1;
+			if (ntok >= 11) {
+				/* 範囲の検査はチャンバの寸法が決まってから (入力の読み終わり) */
+				sl.x0 = atof(token[7]);
+				sl.x1 = atof(token[8]);
+				sl.y0 = atof(token[9]);
+				sl.y1 = atof(token[10]);
+				sl.full = 0;
+			}
 			im = find_mat(p, token[6]);
 			if (im < 0) {
 				fprintf(stderr, "*** unknown material : %s\n", token[6]);
@@ -807,19 +1331,8 @@ int input_data(FILE *fp, ppfd_t *p)
 				ierr = 1;
 				continue;
 			}
-			/*
-			葉材料は全スラブで共通にする。減衰は
-			exp(-Σ_j G_j a_j √(1-ω_j) s_j) なので、材料 (= ω) が段ごとに
-			違うと波長ごとの重みが段ごとに変わり、経路長を 1 個の
-			スカラにまとめられなくなる (同じ作物を段ごとに育てるのが
-			多段ラックなので、変わるのは LAI と高さ)。
-			*/
-			if ((p->nslab > 0) && (im != p->canopy.imat)) {
-				fprintf(stderr, "*** all canopy slabs must share one leaf material "
-					"(\"%s\" != \"%s\")\n", p->mat[im].name, p->mat[p->canopy.imat].name);
-				ierr = 1;
-				continue;
-			}
+			/* 葉材料が段ごとに違ってよいかは leafscatter で決まる (入力の読み終わりで判定) */
+			sl.imat = im;
 			sl.a = sl.lai / (sl.ztop - sl.zbot);
 			APPEND(p->slab, p->nslab, cslab, cslab_t);
 			p->slab[p->nslab++] = sl;
@@ -847,6 +1360,12 @@ int input_data(FILE *fp, ppfd_t *p)
 		else if (!strcmp(token[0], "photoperiod")) {
 			p->photoperiod = atof(token[2]);
 		}
+		else if (!strcmp(token[0], "montecarlo")) {
+			/* montecarlo = <光子数> [種] : 決定論の解法の代わりに光子追跡で解く */
+			const double nn = atof(token[2]);
+			p->mc_n = (nn > 2147483647.0) ? 2147483647 : ((nn < 0.0) ? 0 : (int)nn);
+			if (ntok >= 4) p->mc_seed = (unsigned long long)atof(token[3]);
+		}
 		else if (!strcmp(token[0], "solver")) {
 			if (ntok >= 3) p->maxiter = atoi(token[2]);
 			if (ntok >= 4) p->converg = atof(token[3]);
@@ -866,9 +1385,13 @@ int input_data(FILE *fp, ppfd_t *p)
 			if (p->canopy.nlayer > 256) p->canopy.nlayer = 256;
 		}
 		else if (!strcmp(token[0], "specbounce")) {
+			/* 上限は変換の数で決める (spec_fit_order が下げたらログに出す) */
 			p->specbounce = atoi(token[2]);
 			if (p->specbounce < 0) p->specbounce = 0;
-			if (p->specbounce > 6) p->specbounce = 6;
+			if (p->specbounce > 64) {
+				fprintf(stderr, "*** warning : specbounce %d -> 64\n", p->specbounce);
+				p->specbounce = 64;
+			}
 		}
 		else if (!strcmp(token[0], "quadrature")) {
 			p->msub = atoi(token[2]);
@@ -903,6 +1426,144 @@ int input_data(FILE *fp, ppfd_t *p)
 		return 1;
 	}
 
+	/* 任意の向きの測定面はチャンバの内側に収める */
+	for (i = 0; i < p->ntarget; i++) {
+		const target_t *t = &p->target[i];
+		const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+		int k;
+		if (!t->sensor) continue;
+		for (k = 0; k < 4; k++) {
+			const vec3_t c = v_add(t->org, v_add(((k == 1) || (k == 2)) ? t->eu : v_make(0, 0, 0),
+			                                    (k >= 2) ? t->ev : v_make(0, 0, 0)));
+			if ((c.x < -tol) || (c.x > p->Lx + tol) || (c.y < -tol) || (c.y > p->Ly + tol)
+			 || (c.z < -tol) || (c.z > p->Lz + tol)) {
+				fprintf(stderr, "*** sensor \"%s\" sticks out of the chamber "
+					"(corner %g %g %g)\n", t->name, c.x, c.y, c.z);
+				return 1;
+			}
+		}
+	}
+
+	/*
+	鏡面反射を運ぶのはチャンバの壁 (鏡像法) だけ。棚板や斜めの板に鏡面の
+	材料を付けると、その ρs の分は吸収 (1 - ρd - ρs) からも外され、どこへも
+	運ばれずに消える (収支が黙って破れる : 実測 -1.4%)。入力段で弾く。
+	*/
+	for (i = 0; i < p->nocc; i++) {
+		if ((p->mat[p->occ[i].imat].rhos > 0.0) && (p->mc_n <= 0)) {
+			fprintf(stderr, "*** occluder \"%s\" : specular material \"%s\" is not supported\n",
+				p->occ[i].name, p->mat[p->occ[i].imat].name);
+			fprintf(stderr, "    (specular reflection is modelled on chamber walls only)\n");
+			return 1;
+		}
+	}
+	for (i = 0; i < p->npanel; i++) {
+		if ((p->mat[p->panel[i].imat].rhos > 0.0) && (p->mc_n <= 0)) {
+			fprintf(stderr, "*** panel \"%s\" : specular material \"%s\" is not supported\n",
+				p->panel[i].name, p->mat[p->panel[i].imat].name);
+			fprintf(stderr, "    (specular reflection is modelled on chamber walls only)\n");
+			return 1;
+		}
+	}
+
+	/*
+	斜めの板はチャンバの内側に収める。はみ出すと板の裏表が壁の外の何も
+	無い空間を見ることになり、閉じた面の集合でなくなって収支が壊れる。
+	*/
+	for (i = 0; i < p->npanel; i++) {
+		const panel_t *pn = &p->panel[i];
+		const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+		int k;
+		for (k = 0; k < 4; k++) {
+			const vec3_t c = v_add(pn->org, v_add(((k == 1) || (k == 2)) ? pn->eu : v_make(0, 0, 0),
+			                                     (k >= 2) ? pn->ev : v_make(0, 0, 0)));
+			if ((c.x < -tol) || (c.x > p->Lx + tol) || (c.y < -tol) || (c.y > p->Ly + tol)
+			 || (c.z < -tol) || (c.z > p->Lz + tol)) {
+				fprintf(stderr, "*** panel \"%s\" sticks out of the chamber "
+					"(corner %g %g %g)\n", pn->name, c.x, c.y, c.z);
+				return 1;
+			}
+		}
+	}
+
+	/*
+	面が同じ場所に重なる置き方のうち、二重計上になるものを弾く。
+	  - 体積の重なる箱 : 同じ向きの面が重なり、同じ光を 2 枚が受ける
+	  - 同じ平面で重なる厚さ 0 の板どうし : 重なった部分の 4 面がすべて互いに
+	    覆われ (setup_patch の pcov)、そこへ来た光をだれも受けない
+	  - 壁・遮蔽物の面と同一平面で重なる斜めの板 (覆う / 覆われるを扱わない)
+	向かい合う面の接触 (床に直に置いた箱、床に寝かせた板、棚板に載せた箱、
+	側壁に接する棚板) は可 : 格子を接触線にそろえ、覆われたパッチを外す。
+	*/
+	{
+		const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+		int a, b;
+		for (a = 0; a < p->nocc; a++) {
+			for (b = a + 1; b < p->nocc; b++) {
+				const occluder_t *u = &p->occ[a], *v = &p->occ[b];
+				const double wx = ((u->x1 < v->x1) ? u->x1 : v->x1) - ((u->x0 > v->x0) ? u->x0 : v->x0);
+				const double wy = ((u->y1 < v->y1) ? u->y1 : v->y1) - ((u->y0 > v->y0) ? u->y0 : v->y0);
+				const double wz = ((u->z1 < v->z1) ? u->z1 : v->z1) - ((u->z0 > v->z0) ? u->z0 : v->z0);
+				const int tu = ((u->x1 - u->x0) <= 1e-12) ? 0 : (((u->y1 - u->y0) <= 1e-12) ? 1 : (((u->z1 - u->z0) <= 1e-12) ? 2 : -1));
+				const int tv = ((v->x1 - v->x0) <= 1e-12) ? 0 : (((v->y1 - v->y0) <= 1e-12) ? 1 : (((v->z1 - v->z0) <= 1e-12) ? 2 : -1));
+				int bad = 0;
+				if ((wx > tol) && (wy > tol) && (wz > tol)) bad = 1;          /* 体積の重なり */
+				if ((tu >= 0) && (tu == tv)) {
+					/* 同じ向きの板 : 同じ平面で面積が重なる */
+					const double w1 = (tu == 0) ? wy : wx, w2 = (tu == 2) ? wy : wz;
+					if ((fabs((tu == 0) ? (u->x0 - v->x0) : ((tu == 1) ? (u->y0 - v->y0) : (u->z0 - v->z0))) <= tol)
+					 && (w1 > tol) && (w2 > tol)) bad = 1;
+				}
+				if (bad) {
+					fprintf(stderr, "*** occluders \"%s\" and \"%s\" overlap (the shared surface would be "
+						"counted twice)\n", u->name, v->name);
+					fprintf(stderr, "    (touching is fine : put one on top of the other, or merge them)\n");
+					return 1;
+				}
+			}
+		}
+		for (a = 0; a < p->npanel; a++) {
+			const panel_t *pn = &p->panel[a];
+			const int an = (fabs(pn->n.x) > 1.0 - 1e-9) ? 0 : ((fabs(pn->n.y) > 1.0 - 1e-9) ? 1 : ((fabs(pn->n.z) > 1.0 - 1e-9) ? 2 : -1));
+			const double L[3] = {p->Lx, p->Ly, p->Lz};
+			const double w = (an == 0) ? pn->org.x : ((an == 1) ? pn->org.y : pn->org.z);
+			int bad = 0;
+			if (an < 0) continue;
+			if ((fabs(w) <= tol) || (fabs(w - L[an]) <= tol)) bad = 1;
+			for (b = 0; (b < p->nocc) && !bad; b++) {
+				const occluder_t *o = &p->occ[b];
+				const double lo[3] = {o->x0, o->y0, o->z0}, hi[3] = {o->x1, o->y1, o->z1};
+				vec3_t c[4];
+				double mn[3], mx[3];
+				int k, v2, ov = 1;
+				if ((fabs(w - lo[an]) > tol) && (fabs(w - hi[an]) > tol)) continue;
+				c[0] = pn->org;
+				c[1] = v_add(pn->org, pn->eu);
+				c[2] = v_add(c[1], pn->ev);
+				c[3] = v_add(pn->org, pn->ev);
+				for (k = 0; k < 3; k++) {
+					mn[k] = 1e300;
+					mx[k] = -1e300;
+					for (v2 = 0; v2 < 4; v2++) {
+						const double x = (k == 0) ? c[v2].x : ((k == 1) ? c[v2].y : c[v2].z);
+						if (x < mn[k]) mn[k] = x;
+						if (x > mx[k]) mx[k] = x;
+					}
+					if ((k != an) && ((((mx[k] < hi[k]) ? mx[k] : hi[k]) - ((mn[k] > lo[k]) ? mn[k] : lo[k])) <= tol)) ov = 0;
+				}
+				if (ov) bad = 1;
+			}
+			if (bad) {
+				fprintf(stderr, "*** panel \"%s\" lies on a wall / occluder face (the surface would be "
+					"counted twice)\n", pn->name);
+				fprintf(stderr, "    (raise it off the surface, or use an occluder plate instead)\n");
+				return 1;
+			}
+		}
+	}
+
+	if (check_emitter_surfaces(p)) return 1;
+
 	/* ---- 群落スラブ : z の降順に並べ、重なりを弾き、減衰重みを決める ---- */
 	if (p->nslab > 0) {
 		int j, k;
@@ -918,13 +1579,67 @@ int input_data(FILE *fp, ppfd_t *p)
 				p->slab[best] = t;
 			}
 		}
+		/*
+		葉材料は、散乱モデルが無効なら全スラブで共通にする。減衰は
+		exp(-Σ_j G_j a_j √(1-ω_j) s_j) なので、材料 (= ω) が段ごとに違うと
+		波長ごとの重みが段ごとに変わり、パッチ対の経路長を 1 個のスカラに
+		まとめられなくなる。leafscatter = on ではビームを素の遮断 k = G a
+		(波長によらない) で運び、ω は段ごとのカラムにしか現れないので、
+		段ごとに違う葉材料 (段ごとに違う作物) を置ける。
+		*/
 		for (j = 1; j < p->nslab; j++) {
-			/* 重なると同じ葉を二重に数えるので弾く (接するのは可) */
-			if (p->slab[j].ztop > p->slab[j - 1].zbot) {
-				fprintf(stderr, "*** canopy slabs overlap : z = %g..%g and %g..%g\n",
-					p->slab[j].zbot, p->slab[j].ztop,
-					p->slab[j - 1].zbot, p->slab[j - 1].ztop);
+			if ((p->slab[j].imat != p->slab[0].imat) && !p->canopy.scatter) {
+				fprintf(stderr, "*** canopy slabs with different leaf materials (\"%s\" != \"%s\") "
+					"need leafscatter = on\n", p->mat[p->slab[j].imat].name, p->mat[p->slab[0].imat].name);
+				fprintf(stderr, "    (without scattering the extinction G a sqrt(1-omega) depends on the "
+					"wavelength slab by slab)\n");
 				return 1;
+			}
+		}
+		/*
+		水平範囲 : 省略は断面全体。範囲を書いても断面全体を覆うなら従来の
+		スラブとして扱う (同じ経路で計算するので結果がビット一致する)。
+		*/
+		for (j = 0; j < p->nslab; j++) {
+			cslab_t *c = &p->slab[j];
+			if (!c->full) {
+				if ((c->x1 <= c->x0) || (c->y1 <= c->y0)) {
+					fprintf(stderr, "*** invalid canopy extent : x %g..%g, y %g..%g\n",
+						c->x0, c->x1, c->y0, c->y1);
+					return 1;
+				}
+				if ((c->x0 < -EPS) || (c->x1 > p->Lx + EPS) || (c->y0 < -EPS) || (c->y1 > p->Ly + EPS)) {
+					fprintf(stderr, "*** canopy extent outside chamber : x %g..%g, y %g..%g\n",
+						c->x0, c->x1, c->y0, c->y1);
+					return 1;
+				}
+				if ((c->x0 <= EPS) && (c->x1 >= p->Lx - EPS) && (c->y0 <= EPS) && (c->y1 >= p->Ly - EPS)) {
+					c->full = 1;
+				}
+			}
+			if (c->full) {
+				c->x0 = 0.0;
+				c->x1 = p->Lx;
+				c->y0 = 0.0;
+				c->y1 = p->Ly;
+			}
+			/* 範囲を限った群落は鏡像の複製へ写すので、チャンバの中に収める */
+			if (!c->full && ((c->zbot < -EPS) || (c->ztop > p->Lz + EPS))) {
+				fprintf(stderr, "*** canopy outside chamber : z = %g..%g\n", c->zbot, c->ztop);
+				return 1;
+			}
+		}
+		for (j = 0; j < p->nslab; j++) {
+			for (k = j + 1; k < p->nslab; k++) {
+				/* 重なると同じ葉を二重に数えるので弾く (接するのは可) */
+				const cslab_t *u = &p->slab[j], *v = &p->slab[k];
+				if ((u->zbot < v->ztop) && (v->zbot < u->ztop)
+				 && (u->x0 < v->x1) && (v->x0 < u->x1)
+				 && (u->y0 < v->y1) && (v->y0 < u->y1)) {
+					fprintf(stderr, "*** canopy slabs overlap : z = %g..%g and %g..%g\n",
+						v->zbot, v->ztop, u->zbot, u->ztop);
+					return 1;
+				}
 			}
 		}
 		/*
@@ -951,13 +1666,160 @@ int input_data(FILE *fp, ppfd_t *p)
 					((ref > 0.0) ? ((p->slab[j].k0 * p->slab[j].a) / ref) : 1.0);
 			}
 		}
-		if (p->canopy.scatter && (p->nslab > 1)) {
-			fprintf(stderr, "*** leafscatter supports a single canopy slab only "
-				"(%d given)\n", p->nslab);
-			fprintf(stderr, "    (the two-stream field is one vertical column; "
-				"several columns would have to\n");
-			fprintf(stderr, "     exchange with each other through the cavity)\n");
-			return 1;
+		/*
+		段 (tier) : 同じ高さ範囲に並ぶスラブ (栽培ベッド) を 1 段とする。
+		スラブは ztop の降順なので、同じ高さ範囲のものは並んでいる。
+		*/
+		{
+			int nt = 0;
+			for (j = 0; j < p->nslab; j++) {
+				if ((j > 0) && (fabs(p->slab[j].ztop - p->slab[j - 1].ztop) <= EPS)
+				 && (fabs(p->slab[j].zbot - p->slab[j - 1].zbot) <= EPS)) {
+					p->slab[j].tier = p->slab[j - 1].tier;
+				}
+				else {
+					p->slab[j].tier = nt++;
+				}
+			}
+		}
+		if (p->canopy.scatter) {
+			/*
+			散乱モデルではスラブごとに 1 本のカラム (水平範囲 = 床面積) を解く。
+			段ごとに断面全体のスラブなら、隣り合う段と向かい合う面どうしで
+			拡散光をやりとりする (canopy_setup の cxup / cxdn)。栽培ベッドの段
+			(範囲を限ったスラブ、または同じ高さに並ぶ複数のスラブ) は :
+			  - ベッドの側面からの横方向の出入りは表現しない (上下の面だけ。
+			    断面全体のスラブの埋没パッチと同じ近似で、収支は閉じる)
+			  - 隣の段との間に断面いっぱいの棚板を要求する (ベッドの面から出た
+			    光が通路を抜けて別の段のベッドを通る経路を運べないため)
+			  - 床・天井の鏡面とは併用させない (面の鏡像が別のベッドの面へ戻る
+			    経路を持たない)。床・天井・トレイに乗るのは可 (上の resttop / restbot)
+			*/
+			const int zmir = (p->mat[p->wallmat[4]].rhos > 0.0) || (p->mat[p->wallmat[5]].rhos > 0.0);
+			/*
+			群落の中を通る遮蔽物・斜めの板は弾く。散乱場はスラブごとに 1 本の鉛直
+			カラムで、カラムの中に遮るものを持たないので、群落を横切る棚板があると
+			散乱光がカラムの中を通って棚板の向こうへ出る (光源が棚板の下だけでも
+			上の測定面に 0.11 umol/m2/s)。棚板の高さで群落を 2 枚に割れば段として
+			正しく扱える (面が棚板に乗る : 検証 (ad))。光子追跡 (montecarlo) は
+			群落を 3 次元で追うのでこの制限は無い。
+			*/
+			if (p->mc_n <= 0) {
+				const double tol = 1e-9 * (p->Lx + p->Ly + p->Lz);
+				int io;
+				for (j = 0; j < p->nslab; j++) {
+					const cslab_t *c = &p->slab[j];
+					const double slo[3] = {c->x0, c->y0, c->zbot}, shi[3] = {c->x1, c->y1, c->ztop};
+					for (io = 0; io < p->nocc; io++) {
+						const occluder_t *o = &p->occ[io];
+						const double lo[3] = {o->x0, o->y0, o->z0}, hi[3] = {o->x1, o->y1, o->z1};
+						int ax, in = 1;
+						for (ax = 0; ax < 3; ax++) {
+							if (hi[ax] - lo[ax] <= 1e-12) {
+								/* 厚さ 0 の向き : 板の平面が群落の内側を通るか */
+								if (!((lo[ax] > slo[ax] + tol) && (lo[ax] < shi[ax] - tol))) in = 0;
+							}
+							else {
+								const double w = ((hi[ax] < shi[ax]) ? hi[ax] : shi[ax]) - ((lo[ax] > slo[ax]) ? lo[ax] : slo[ax]);
+								if (w <= tol) in = 0;
+							}
+						}
+						if (in) {
+							fprintf(stderr, "*** leafscatter : occluder \"%s\" passes through the canopy z = %g..%g\n",
+								o->name, c->zbot, c->ztop);
+							fprintf(stderr, "    (split the canopy at the occluder into separate canopy lines, "
+								"or use montecarlo)\n");
+							return 1;
+						}
+					}
+					for (io = 0; io < p->npanel; io++) {
+						double ilo[3], ihi[3];
+						int ax;
+						for (ax = 0; ax < 3; ax++) {
+							ilo[ax] = slo[ax] + tol;
+							ihi[ax] = shi[ax] - tol;
+						}
+						if (panel_box_area(&p->panel[io], ilo, ihi) > tol * tol) {
+							fprintf(stderr, "*** leafscatter : panel \"%s\" passes through the canopy z = %g..%g\n",
+								p->panel[io].name, c->zbot, c->ztop);
+							fprintf(stderr, "    (split the canopy at the panel, move the panel out, or use montecarlo)\n");
+							return 1;
+						}
+					}
+				}
+			}
+			/*
+			面が何かに乗っているか。同一平面で向かい合う面 (床・棚板の上面など)
+			が面を全部覆えば、面から出る散乱光はそのパッチがそのまま受け、面は
+			ほかのどこからも見えない (canopy_setup / gather_target)。一部だけ
+			覆うなら、覆われていない部分だけを他へ配る経路を持たないので弾く
+			(以前は覆われた部分の光が棚板を素通りして下の段へ漏れていた)。
+			*/
+			for (j = 0; j < p->nslab; j++) {
+				cslab_t *c = &p->slab[j];
+				const double ac = (c->x1 - c->x0) * (c->y1 - c->y0);
+				int side;
+				for (side = 0; side < 2; side++) {
+					const double cov = face_cover(p, c, side);
+					if (cov > ac * (1.0 + 1e-9)) {
+						fprintf(stderr, "*** leafscatter : surfaces under/over the canopy face z = %g overlap\n",
+							side ? c->ztop : c->zbot);
+						return 1;
+					}
+					if (cov >= ac * (1.0 - 1e-9)) {
+						if (side) c->resttop = 1;
+						else      c->restbot = 1;
+					}
+					else if (cov > ac * 1e-9) {
+						fprintf(stderr, "*** leafscatter : the canopy %s face z = %g rests only partly on a surface "
+							"(%.4g of %.4g m2)\n", side ? "top" : "bottom", side ? c->ztop : c->zbot, cov, ac);
+						fprintf(stderr, "    (make the shelf/tray cover the canopy footprint, or leave a gap)\n");
+						return 1;
+					}
+				}
+			}
+			for (j = 0; j < p->nslab; j++) {
+				int bedtier = !p->slab[j].full;
+				for (k = 0; k < p->nslab; k++) {
+					if ((k != j) && (p->slab[k].tier == p->slab[j].tier)) bedtier = 1;
+				}
+				/* 段どうしの高さ範囲は重ならない (並んだベッドは同じ範囲) */
+				for (k = 0; k < p->nslab; k++) {
+					if ((p->slab[k].tier != p->slab[j].tier)
+					 && (p->slab[k].zbot < p->slab[j].ztop - EPS) && (p->slab[j].zbot < p->slab[k].ztop - EPS)) {
+						fprintf(stderr, "*** leafscatter : canopy beds side by side must share one height range "
+							"(z = %g..%g and %g..%g)\n", p->slab[j].zbot, p->slab[j].ztop,
+							p->slab[k].zbot, p->slab[k].ztop);
+						return 1;
+					}
+				}
+				if (!bedtier) continue;
+				if (zmir) {
+					fprintf(stderr, "*** leafscatter : canopy beds cannot be combined with a specular floor/ceiling\n");
+					return 1;
+				}
+				/* 隣の段との間の棚板 */
+				for (k = 0; k < p->nslab; k++) {
+					double zlo, zhi;
+					int    io, shelf = 0;
+					if ((p->slab[k].tier != p->slab[j].tier + 1) && (p->slab[k].tier != p->slab[j].tier - 1)) continue;
+					zlo = (p->slab[k].tier > p->slab[j].tier) ? p->slab[k].ztop : p->slab[j].ztop;
+					zhi = (p->slab[k].tier > p->slab[j].tier) ? p->slab[j].zbot : p->slab[k].zbot;
+					for (io = 0; io < p->nocc; io++) {
+						const occluder_t *o = &p->occ[io];
+						if ((o->x0 <= EPS) && (o->x1 >= p->Lx - EPS) && (o->y0 <= EPS) && (o->y1 >= p->Ly - EPS)
+						 && (o->z0 >= zlo - EPS) && (o->z1 <= zhi + EPS)) {
+							shelf = 1;
+							break;
+						}
+					}
+					if (!shelf) {
+						fprintf(stderr, "*** leafscatter with canopy beds needs a shelf (occluder) covering the "
+							"whole cross-section between z = %g and %g\n", zlo, zhi);
+						return 1;
+					}
+				}
+			}
 		}
 	}
 
@@ -984,24 +1846,38 @@ int input_data(FILE *fp, ppfd_t *p)
 				}
 			}
 		}
-		if (spec && (p->nocc > 0)) {
-			fprintf(stderr, "*** specular walls cannot be combined with occluders\n");
-			fprintf(stderr, "    (the mirror-image method folds the path; the shadow test\n");
-			fprintf(stderr, "     on the straight image ray would be wrong)\n");
-			return 1;
-		}
-		if (spec && p->canopy.on) {
-			/*
-			側壁 (x/y 面) の鏡映は z を保つので群落スラブは鏡映で不変。
-			床・天井の鏡映はスラブを動かすが、鏡像への直線の z を周期 2Lz の
-			三角波で折り返せば実経路の z プロファイルが厳密に得られるので、
-			canopy_path (geometry.c) がその折り返しで経路長を測る。どちらも
-			弧長は鏡映で保たれるため、群落減衰は鏡像への直線のまま厳密。
-			散乱の還流だけは鏡像経路ぶんの層への預け入れが要るため未対応。
-			*/
-			if (p->canopy.scatter) {
-				fprintf(stderr, "*** specular walls cannot be combined with leafscatter yet\n");
+		/*
+		鏡面と群落の併用 (入力段で弾くものは無い) :
+		側壁 (x/y 面) の鏡映は z を保つので群落スラブは鏡映で不変。
+		床・天井の鏡映はスラブを動かすが、鏡像への直線の z を周期 2Lz の
+		三角波で折り返せば実経路の z プロファイルが厳密に得られるので、
+		canopy_path (geometry.c) がその折り返しで経路長を測る。どちらも
+		弧長は鏡映で保たれるため、群落減衰は鏡像への直線のまま厳密。
+		散乱の還流 (leafscatter) も同じ展開した直線で、経路に沿った順に層へ
+		預ける (canopy_deposit)。群落の面から出た光が床・天井の鏡面で同じ面へ
+		戻る分は二流の境界の反射率になる (canopy_setup の crtop / crbot)。
+		*/
+	}
+
+	/*
+	光沢反射 (glossy) はラジオシティでは表せない (放射輝度が向きによらない
+	前提) ので montecarlo のときだけ受け付ける。ρd + ρs + ρg <= 1。
+	*/
+	{
+		int im2, il2;
+		for (im2 = 0; im2 < p->nmat; im2++) {
+			const pmat_t *m = &p->mat[im2];
+			if (m->rhog <= 0.0) continue;
+			if (p->mc_n <= 0) {
+				fprintf(stderr, "*** material \"%s\" : glossy reflection needs montecarlo = <photons>\n", m->name);
+				fprintf(stderr, "    (radiosity assumes view-independent radiance)\n");
 				return 1;
+			}
+			for (il2 = 0; il2 < p->nlam; il2++) {
+				if (m->rho[il2] + m->rhos + m->rhog > 1.0 + 1e-12) {
+					fprintf(stderr, "*** material \"%s\" : rho_d + rho_s + rho_g > 1\n", m->name);
+					return 1;
+				}
 			}
 		}
 	}

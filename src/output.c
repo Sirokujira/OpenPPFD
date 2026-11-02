@@ -84,10 +84,33 @@ void output_log(ppfd_t *p)
 		plog(p, "occluder     : %-10s x %g..%g, y %g..%g, z %g..%g m, %s\n",
 			o->name, o->x0, o->x1, o->y0, o->y1, o->z0, o->z1, p->mat[o->imat].name);
 	}
+	for (ie = 0; ie < p->ncyl; ie++) {
+		/* 曲面は内接多角形で近似している : 弦と円弧の最大のずれ (サジタ) を出す */
+		const cyl_t *cy = &p->cyl[ie];
+		const double da = (cy->a1 - cy->a0) / cy->nseg * (PI / 180.0);
+		plog(p, "cylinder     : %-10s R = %g m, arc %g..%g deg, %d flat panels "
+			"(inscribed polygon : sagitta %.3g m = %.2g R)\n",
+			cy->name, cy->r, cy->a0, cy->a1, cy->nseg,
+			cy->r * (1.0 - cos(0.5 * da)), 1.0 - cos(0.5 * da));
+	}
+	for (ie = 0; ie < p->npanel; ie++) {
+		const panel_t *pn = &p->panel[ie];
+		const vec3_t p1 = v_add(pn->org, pn->eu), p3 = v_add(pn->org, pn->ev);
+		plog(p, "panel        : %-10s (%g %g %g) (%g %g %g) (%g %g %g), normal (%.4g %.4g %.4g), %s\n",
+			pn->name, pn->org.x, pn->org.y, pn->org.z, p1.x, p1.y, p1.z, p3.x, p3.y, p3.z,
+			pn->n.x, pn->n.y, pn->n.z, p->mat[pn->imat].name);
+	}
 	for (ie = 0; ie < p->nslab; ie++) {
 		const cslab_t *c = &p->slab[ie];
-		plog(p, "canopy       : z = %g..%g m, LAI = %g, G = %g, leaf = %s\n",
-			c->zbot, c->ztop, c->lai, c->k0, p->mat[p->canopy.imat].name);
+		if (c->full) {
+			plog(p, "canopy       : z = %g..%g m, LAI = %g, G = %g, leaf = %s\n",
+				c->zbot, c->ztop, c->lai, c->k0, p->mat[c->imat].name);
+		}
+		else {
+			plog(p, "canopy       : z = %g..%g m, x = %g..%g, y = %g..%g, LAI = %g, G = %g, leaf = %s\n",
+				c->zbot, c->ztop, c->x0, c->x1, c->y0, c->y1, c->lai, c->k0,
+				p->mat[c->imat].name);
+		}
 	}
 	for (ie = 0; ie < p->ndist; ie++) {
 		const photdist_t *d = &p->dist[ie];
@@ -96,8 +119,12 @@ void output_log(ppfd_t *p)
 		if (d->lm > 0.0) plog(p, ", rated %.4g lm", d->lm);
 		if (d->watt > 0.0) plog(p, ", %.4g W", d->watt);
 		plog(p, ") -- shape only, flux taken from the input file\n");
-		if (!d->isldt && (d->ptype != 1)) {
-			plog(p, "  * warning : photometric type %d is not type C; treated as type C\n", d->ptype);
+		if (!d->isldt && (d->ptype == 2 || d->ptype == 3)) {
+			plog(p, "  photometric type %s (H, V : %s)\n", (d->ptype == 3) ? "A" : "B",
+				(d->ptype == 3) ? "azimuth about up / elevation" : "latitude to lateral / rotation about lateral");
+		}
+		else if (!d->isldt && (d->ptype != 1)) {
+			plog(p, "  * warning : photometric type %d is not type A/B/C; treated as type C\n", d->ptype);
 		}
 	}
 
@@ -110,6 +137,25 @@ void output_log(ppfd_t *p)
 	}
 
 	plog(p, "\n--- source totals ---\n");
+	{
+		/*
+		計算する波長範囲から外れるスペクトルの分は計算に乗らない (W 欄の
+		放射束は範囲内の分だけにしてある)。黙って捨てずにここで示す。
+		*/
+		int is;
+		for (is = 0; is < p->nspec; is++) {
+			if (p->spec[is].fin < 1.0) {
+				plog(p, "  * spectrum \"%s\" : %.4g %% of its radiant flux lies outside %g - %g nm "
+					"and is not modelled (W-rated sources keep only the in-range part)\n",
+					p->spec[is].name, 100.0 * (1.0 - p->spec[is].fin),
+					p->lam0 - (0.5 * p->dlam), p->lam[p->nlam - 1] + (0.5 * p->dlam));
+			}
+		}
+		if ((p->lam0 - (0.5 * p->dlam) > 400.0 + 1e-9) || (p->lam[p->nlam - 1] + (0.5 * p->dlam) < 700.0 - 1e-9)) {
+			plog(p, "  * warning : the wavelength range does not cover 400 - 700 nm; PPF / PPFD count only "
+				"the computed part of PAR\n");
+		}
+	}
 	plog(p, "radiant flux      = %12.6g W\n", p->flux_total);
 	plog(p, "PPF (400-700nm)   = %12.6g umol/s\n", p->ppf_total);
 	plog(p, "luminous flux     = %12.6g lm\n", lm_total);
@@ -131,8 +177,23 @@ void output_log(ppfd_t *p)
 	}
 	plog(p, "\n--- energy balance ---\n");
 	plog(p, "emitted           = %12.6g W\n", p->flux_total);
+	if (p->mc_n > 0) {
+		/* 光子は必ずどこかで吸収されるので、収支のずれは打ち切った分だけ */
+		plog(p, "absorbed by walls = %12.6g W%s\n", p->absorb_wall,
+			occ_any(p) ? " (incl. occluders)" : "");
+		if (p->canopy.on) {
+			plog(p, "absorbed by canopy= %12.6g W (monte carlo, leaf scattering included)\n", p->absorb_canopy);
+			plog(p, "canopy PPF capture= %12.6g umol/s (%.2f %% of PPF)\n",
+				p->canopy_abs, (p->ppf_total > 0.0) ? (100.0 * p->canopy_abs / p->ppf_total) : 0.0);
+		}
+		plog(p, "truncated photons = %12.6g W (more than the interaction limit)\n", p->mc_lost);
+		plog(p, "closure error     = %12.3e (should be 0; = truncated photons)\n",
+			(p->flux_total > 0.0)
+				? (((p->absorb_wall + p->absorb_canopy) - p->flux_total) / p->flux_total) : 0.0);
+		goto targets;
+	}
 	plog(p, "absorbed by walls = %12.6g W%s\n", p->absorb_wall,
-		(p->nocc > 0) ? " (incl. occluders)" : "");
+		occ_any(p) ? " (incl. occluders)" : "");
 	plog(p, "mean wall irrad.  = %12.6g W/m2 (wall area %g m2)\n",
 		(awall > 0.0) ? (ewall / awall) : 0.0, awall);
 	if (p->canopy.on) {
@@ -154,12 +215,21 @@ void output_log(ppfd_t *p)
 	}
 
 	/* 測定面 */
+targets:
 	for (it = 0; it < p->ntarget; it++) {
 		target_t *t = &p->target[it];
 		tstat_t   st;
 		target_stat(p, t, &st);
 
-		plog(p, "\n--- target \"%s\" (z = %g m, %d x %d cells) ---\n", t->name, t->z, t->nx, t->ny);
+		if (t->sensor) {
+			const vec3_t p1 = v_add(t->org, t->eu), p3 = v_add(t->org, t->ev);
+			plog(p, "\n--- sensor \"%s\" ((%g %g %g) (%g %g %g) (%g %g %g), normal (%.4g %.4g %.4g), "
+				"%d x %d cells) ---\n", t->name, t->org.x, t->org.y, t->org.z, p1.x, p1.y, p1.z,
+				p3.x, p3.y, p3.z, t->n.x, t->n.y, t->n.z, t->nx, t->ny);
+		}
+		else {
+			plog(p, "\n--- target \"%s\" (z = %g m, %d x %d cells) ---\n", t->name, t->z, t->nx, t->ny);
+		}
 		plog(p, "%-22s %12s %12s %12s\n", "quantity", "average", "min", "max");
 		plog(p, "%-22s %12.5g %12.5g %12.5g\n", "PPFD [umol/m2/s]", st.avg, st.min, st.max);
 		plog(p, "%-22s %12.5g\n", "YPFD (McCree)", st.ypfd);
@@ -205,18 +275,39 @@ void output_csv(ppfd_t *p)
 		snprintf(fn, sizeof(fn), "ppfd_map_%s.csv", t->name);
 		fp = fopen(fn, "w");
 		if (fp == NULL) continue;
-		fprintf(fp, "ix,iy,x_m,y_m,ppfd_umol_m2_s,ypfd_umol_m2_s,epar_umol_m2_s,lux,irradiance_W_m2,r_fr\n");
+		/*
+		列 1-10 は target / sensor 共通 (5 列目が PPFD)。sensor は 3, 4 列目を
+		面内の座標 u, v [m] (隅からの eu, ev 方向の距離) にし、セル中心の
+		x, y, z を末尾に足す。
+		*/
+		if (t->sensor) {
+			fprintf(fp, "ix,iy,u_m,v_m,ppfd_umol_m2_s,ypfd_umol_m2_s,epar_umol_m2_s,lux,irradiance_W_m2,r_fr,"
+			            "x_m,y_m,z_m\n");
+		}
+		else {
+			fprintf(fp, "ix,iy,x_m,y_m,ppfd_umol_m2_s,ypfd_umol_m2_s,epar_umol_m2_s,lux,irradiance_W_m2,r_fr\n");
+		}
 		for (iy = 0; iy < t->ny; iy++) {
 			for (ix = 0; ix < t->nx; ix++) {
 				const int ic = (iy * t->nx) + ix;
 				const double *E = TCELL(t, ic, nl);
 				const double fr = calc_bandppf(p, E, 725.0, 735.0);
-				fprintf(fp, "%d,%d,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
-					ix, iy,
-					t->x0 + ((ix + 0.5) * dx), t->y0 + ((iy + 0.5) * dy),
-					calc_ppfd(p, E), calc_ypfd(p, E), calc_epar(p, E),
-					calc_lux(p, E), calc_irradiance(p, E),
-					(fr > 0.0) ? (calc_bandppf(p, E, 655.0, 665.0) / fr) : 0.0);
+				const double rfr = (fr > 0.0) ? (calc_bandppf(p, E, 655.0, 665.0) / fr) : 0.0;
+				if (t->sensor) {
+					const double fu = (ix + 0.5) / t->nx, fv = (iy + 0.5) / t->ny;
+					const vec3_t c = v_add(t->org, v_add(v_scale(t->eu, fu), v_scale(t->ev, fv)));
+					fprintf(fp, "%d,%d,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
+						ix, iy, fu * v_norm(t->eu), fv * v_norm(t->ev),
+						calc_ppfd(p, E), calc_ypfd(p, E), calc_epar(p, E),
+						calc_lux(p, E), calc_irradiance(p, E), rfr, c.x, c.y, c.z);
+				}
+				else {
+					fprintf(fp, "%d,%d,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
+						ix, iy,
+						t->x0 + ((ix + 0.5) * dx), t->y0 + ((iy + 0.5) * dy),
+						calc_ppfd(p, E), calc_ypfd(p, E), calc_epar(p, E),
+						calc_lux(p, E), calc_irradiance(p, E), rfr);
+				}
 			}
 		}
 		fclose(fp);

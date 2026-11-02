@@ -1,0 +1,29 @@
+# 検証 (w) rack3.ppfd の下段だけを独立なチャンバとして解いた参照解。
+# 天井 = 棚板の下面 (白)。側壁の z 方向の分割は rack3.ppfd (高さ 1 m を 8 分割)
+# と同じ密度になるよう面ごとの div で 4 にする (xmin / ymax は (長辺, z)、
+# xmax / ymin は (z, 長辺) の順)。上段版は check スクリプトが sed で作る
+# (床 = 棚板の上面 (白)、光源と群落を 0.5 m 下げる)。
+
+OpenPPFD 1 0
+title = lower tier alone
+wavelength = 380 780 5
+chamber    = 1.0 1.0 0.5
+patchdiv   = 8 8
+material = white gray 0.7
+material = tray  gray 0.4
+material = leaf  table 400:0.05:0.02 550:0.15:0.10 660:0.05:0.02 730:0.45:0.45
+wall = all  white
+wall = xmin white div 8 4
+wall = xmax white div 4 8
+wall = ymin white div 4 8
+wall = ymax white div 8 4
+wall = zmin tray
+spectrum = white4000 sum 450 20 1.0 580 110 2.4 660 20 0.8 730 25 0.3
+led = 0.4 0.5 0.45 1.0 white4000 beam 1
+canopy = 0.25 0.05 2.0 0.5 leaf
+leafscatter = on
+target = a_top  0.30 8 8
+target = a_in   0.15 8 8
+photoperiod = 16
+solver      = 500 1e-10
+end

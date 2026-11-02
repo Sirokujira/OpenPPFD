@@ -4,8 +4,11 @@
 # (または ppf / lumens オプション) で与える。したがって放射束は厳密に
 # 保存され、光度分布によらず PPF は 1 W * 4.639437 = 4.639437 umol/s。
 #
-# 幾何は unit.ppfd と同じ (黒チャンバ 1.0 x 1.0 x 0.5、光源は高さ 0.5 m の
-# 中心、555 nm 単色 1 W、床 21 x 21 セル、中心セルの中心が x=y=0.5)。
+# 幾何は unit.ppfd と同じ (黒チャンバ、光源は高さ 0.5 m の中心、555 nm 単色
+# 1 W、床 21 x 21 セル、中心セルの中心が x=y=0.5)。ただし天井は 0.6 m :
+# 等方配光の上半分を天井に「距離 0」で出すと求積で拾えないので、天井に
+# ちょうど乗った光源は入力段で弾く (検証 (af))。黒い壁なので床の値は
+# 天井の高さによらない。
 #
 # 期待値 (いずれも厳密)
 #   iso.ies    : I = Phi/(4 pi) の等方配光。床中心 E = Phi/(4 pi h^2)
@@ -28,7 +31,7 @@ OpenPPFD 1 0
 title = photometric distribution files (IES / EULUMDAT)
 
 wavelength = 380 780 5
-chamber    = 1.0 1.0 0.5
+chamber    = 1.0 1.0 0.6
 patchdiv   = 4 4
 
 material = black gray 0.0
